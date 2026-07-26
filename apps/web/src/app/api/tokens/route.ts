@@ -26,6 +26,7 @@ export async function GET(req: Request) {
   const before = p.get('before') ? Number(p.get('before')) : null; // created-block ceiling
   const q = p.get('q'); // free-text on symbol / address
   const cursor = p.get('cursor') ? Number(p.get('cursor')) : null;
+  const minRisk = p.get('minRisk') ? Number(p.get('minRisk')) : null;
 
   const where = [eq(pools.passesThreshold, true), gte(pools.lockedLiquidityUsd, minUsd)];
 
@@ -34,6 +35,7 @@ export async function GET(req: Request) {
   if (kind) where.push(eq(pools.kind, kind));
   if (factory) where.push(eq(pools.factory, factory.toLowerCase()));
   if (before != null) where.push(lte(pools.createdBlock, before));
+  if (minRisk != null) where.push(gte(pools.riskScore, minRisk));
 
   // "Burned" is the strict, provable subset: LP at a dead address.
   if (lockType === 'burned') where.push(gte(pools.burnedLiquidityUsd, minUsd));
@@ -56,6 +58,10 @@ export async function GET(req: Request) {
       lockedLiquidityUsd: pools.lockedLiquidityUsd,
       burnedLiquidityUsd: pools.burnedLiquidityUsd,
       lockedFraction: pools.lockedFraction,
+      riskScore: pools.riskScore,
+      riskTier: pools.riskTier,
+      riskFlags: pools.riskFlags,
+      riskFindings: pools.riskFindings,
       symbol0: sql<string>`t0.symbol`,
       symbol1: sql<string>`t1.symbol`,
       name0: sql<string>`t0.name`,

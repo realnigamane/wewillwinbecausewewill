@@ -23,7 +23,7 @@
 import 'dotenv/config';
 import { readFileSync, existsSync, mkdirSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { PRE_2024_END_BLOCK, LOCKERS, QUOTE_ASSETS } from '@liqarch/shared';
+import { PRE_2024_END_BLOCK, LOCKERS, QUOTE_ASSETS, generateFindings } from '@liqarch/shared';
 import { MulticallEngine } from './lib/multicall.js';
 import { logger } from './lib/log.js';
 import { discover } from './stages/01-discover.js';
@@ -72,17 +72,50 @@ function memeSide(r: { token0: string; token1: string; quoteSide: number | null 
 /** Classify the memecoin side of each pool for rug/honeypot risk and write it back. */
 async function runRiskForPools(
   mc: MulticallEngine,
-  rows: { address: string; token0: string; token1: string; quoteSide: number | null }[],
+  rows: {
+    address: string;
+    token0: string;
+    token1: string;
+    quoteSide: number | null;
+    lockedLiquidityUsd?: number | null;
+  }[],
 ): Promise<number> {
-  const targets = rows.map((r) => ({ pool: r.address, token: memeSide(r).toLowerCase() }));
+  const targets = rows.map((r) => {
+    const quoteAddr = r.quoteSide === 0 ? r.token0 : r.quoteSide === 1 ? r.token1 : QUOTE_ASSETS[r.token0] ? r.token0 : r.token1;
+    return {
+      pool: r.address,
+      token: memeSide(r).toLowerCase(),
+      quoteSymbol: QUOTE_ASSETS[(quoteAddr ?? '').toLowerCase()]?.symbol ?? null,
+      lockedUsd: r.lockedLiquidityUsd ?? null,
+    };
+  });
   const analysis = await analyzeTokenRisk(
     mc,
     targets.map((t) => t.token),
   );
   const updates = targets
-    .map(({ pool, token }) => {
+    .map(({ pool, token, quoteSymbol, lockedUsd }) => {
       const a = analysis.get(token);
-      return a ? { address: pool, riskScore: a.score, riskTier: a.tier, riskFlags: a.flags } : null;
+      if (!a) return null;
+      const findings = generateFindings(
+        {
+          token,
+          symbol: null,
+          quoteSymbol,
+          pool,
+          lockedUsd,
+          ownerAddress: a.ownerAddress,
+          ownerActive: a.ownerActive,
+        },
+        a.flags,
+      );
+      return {
+        address: pool,
+        riskScore: a.score,
+        riskTier: a.tier,
+        riskFlags: a.flags,
+        riskFindings: findings,
+      };
     })
     .filter((u): u is NonNullable<typeof u> => u !== null);
   await persistRisk(updates);

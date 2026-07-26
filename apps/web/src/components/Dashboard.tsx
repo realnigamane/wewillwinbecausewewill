@@ -15,6 +15,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { usd, pct, shortAddr, ago, etherscan } from '@/lib/format';
 
+export interface RiskFinding {
+  id: string;
+  class: string;
+  title: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  confidence: 'firm' | 'heuristic';
+  evidence: Record<string, string | number | boolean | null>;
+  attackPath: string;
+  assessment: string;
+}
+
 export interface Row {
   address: string;
   kind: string;
@@ -32,6 +43,10 @@ export interface Row {
   symbol1: string | null;
   name0: string | null;
   name1: string | null;
+  riskScore: number | null;
+  riskTier: string | null;
+  riskFlags: string[] | null;
+  riskFindings: RiskFinding[] | null;
 }
 
 const QUOTES = new Set(['WETH', 'USDC', 'USDT', 'DAI', 'FRAX', 'WBTC']);
@@ -50,10 +65,11 @@ interface Filters {
   minLockedPct: number;
   lockType: string;
   kind: string;
+  minRisk: number;
   q: string;
 }
 
-const DEFAULTS: Filters = { minUsd: 100, maxUsd: '', minLockedPct: 0, lockType: '', kind: '', q: '' };
+const DEFAULTS: Filters = { minUsd: 100, maxUsd: '', minLockedPct: 0, lockType: '', kind: '', minRisk: 0, q: '' };
 
 export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; stats: Record<string, number> }) {
   const [filters, setFilters] = useState<Filters>(DEFAULTS);
@@ -72,6 +88,7 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
     if (filters.minLockedPct) p.set('minLockedPct', String(filters.minLockedPct));
     if (filters.lockType) p.set('lockType', filters.lockType);
     if (filters.kind) p.set('kind', filters.kind);
+    if (filters.minRisk) p.set('minRisk', String(filters.minRisk));
     if (filters.q) p.set('q', filters.q);
     return p.toString();
   }, [filters]);
@@ -164,7 +181,7 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
                     key={r.address}
                     onClick={() => setSelected(r)}
                     style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: v.size, transform: `translateY(${v.start}px)` }}
-                    className={`grid cursor-pointer grid-cols-[3rem_minmax(0,2fr)_1fr_1fr_1fr_1fr_1fr] items-center gap-3 border-b border-edge px-4 text-sm hover:bg-panel ${
+                    className={`grid cursor-pointer grid-cols-[3rem_minmax(0,2fr)_1fr_1fr_1fr_0.9fr_1fr_0.8fr] items-center gap-3 border-b border-edge px-4 text-sm hover:bg-panel ${
                       selected?.address === r.address ? 'bg-panel' : ''
                     }`}
                   >
@@ -173,6 +190,7 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
                     <span className="tnum font-medium text-good">{usd(r.lockedLiquidityUsd)}</span>
                     <span className="tnum text-muted">{usd(r.totalLiquidityUsd)}</span>
                     <LockBar fraction={r.lockedFraction} />
+                    <RiskCell row={r} />
                     <span className="tnum text-xs text-muted">{ago(r.createdAt)}</span>
                     <span className="text-xs uppercase text-muted">{r.dexName ?? r.kind}</span>
                   </div>
@@ -293,6 +311,17 @@ function FilterBar({
         <option value="v2">V2-style</option>
         <option value="v3">V3-style</option>
       </select>
+      <select
+        value={filters.minRisk}
+        onChange={(e) => set('minRisk', Number(e.target.value))}
+        className="rounded border border-edge bg-base px-2 py-1.5 outline-none focus:border-accent"
+        title="Contract risk (bug-bounty mode)"
+      >
+        <option value={0}>any risk</option>
+        <option value={15}>medium+ risk</option>
+        <option value={32}>high+ risk</option>
+        <option value={55}>critical only</option>
+      </select>
       <span className="ml-auto tnum text-muted">
         {loading ? 'querying…' : `${count.toLocaleString()} loaded`}
       </span>
@@ -301,9 +330,9 @@ function FilterBar({
 }
 
 function TableHead() {
-  const cols = ['#', 'token', 'locked usd', 'pool usd', 'locked %', 'launched', 'dex'];
+  const cols = ['#', 'token', 'locked usd', 'pool usd', 'locked %', 'risk', 'launched', 'dex'];
   return (
-    <div className="grid grid-cols-[3rem_minmax(0,2fr)_1fr_1fr_1fr_1fr_1fr] gap-3 border-b border-edge px-4 py-2 text-[10px] uppercase tracking-wide text-muted">
+    <div className="grid grid-cols-[3rem_minmax(0,2fr)_1fr_1fr_1fr_0.9fr_1fr_0.8fr] gap-3 border-b border-edge px-4 py-2 text-[10px] uppercase tracking-wide text-muted">
       {cols.map((c) => (
         <span key={c}>{c}</span>
       ))}
@@ -332,6 +361,101 @@ function LockBar({ fraction }: { fraction: number }) {
       </div>
       <span className="tnum text-xs text-muted">{pct(fraction)}</span>
     </div>
+  );
+}
+
+// --- risk display ----------------------------------------------------------
+const RISK_TIER_STYLE: Record<string, string> = {
+  critical: 'bg-bad/20 text-bad',
+  high: 'bg-bad/15 text-bad',
+  medium: 'bg-warn/15 text-warn',
+  low: 'bg-muted/15 text-muted',
+  clean: 'bg-good/15 text-good',
+};
+
+const FLAG_META: Record<string, { label: string; sev: string }> = {
+  SET_BALANCE: { label: 'Arbitrary balance edits', sev: 'crit' },
+  MINT: { label: 'Mintable supply', sev: 'high' },
+  BLACKLIST: { label: 'Holder blacklist', sev: 'high' },
+  TRADING_TOGGLE: { label: 'Trading on/off switch', sev: 'high' },
+  FEE_CTRL: { label: 'Adjustable fees / tax', sev: 'med' },
+  PAUSABLE: { label: 'Pausable transfers', sev: 'med' },
+  MAXTX: { label: 'Max tx / wallet limits', sev: 'low' },
+  PROXY: { label: 'Upgradeable proxy', sev: 'crit' },
+  SELFDESTRUCT: { label: 'Self-destructible', sev: 'high' },
+  OWNER_ACTIVE: { label: 'Owner not renounced', sev: 'med' },
+  RENOUNCED: { label: 'Ownership renounced', sev: 'low' },
+  NO_CODE: { label: 'No bytecode (dead)', sev: 'low' },
+};
+
+const SEV_STYLE: Record<string, string> = {
+  crit: 'bg-bad/20 text-bad',
+  high: 'bg-bad/15 text-bad',
+  med: 'bg-warn/15 text-warn',
+  low: 'bg-muted/20 text-muted',
+};
+
+function flagStyle(f: string) {
+  if (f === 'RENOUNCED') return 'bg-good/15 text-good';
+  return SEV_STYLE[FLAG_META[f]?.sev ?? 'low'] ?? SEV_STYLE.low;
+}
+
+function RiskCell({ row }: { row: Row }) {
+  if (row.riskScore == null || !row.riskTier) {
+    return <span className="text-[10px] text-muted">—</span>;
+  }
+  const style = RISK_TIER_STYLE[row.riskTier] ?? 'bg-muted/15 text-muted';
+  return (
+    <span className={`inline-flex w-fit items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${style}`}>
+      <span className="tnum">{row.riskScore}</span>
+      {row.riskTier}
+    </span>
+  );
+}
+
+const SEV_BADGE: Record<string, string> = {
+  critical: 'bg-bad/20 text-bad',
+  high: 'bg-bad/15 text-bad',
+  medium: 'bg-warn/15 text-warn',
+  low: 'bg-muted/20 text-muted',
+};
+
+/** One finding: click to expand into the attack path + safety read for THIS contract. */
+function FindingCard({ f }: { f: RiskFinding }) {
+  return (
+    <details className="group rounded border border-edge bg-base/40 open:bg-base">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs">
+        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase ${SEV_BADGE[f.severity] ?? ''}`}>
+          {f.severity}
+        </span>
+        <span className="flex-1 font-medium leading-tight">{f.title}</span>
+        {f.confidence === 'heuristic' && (
+          <span className="shrink-0 text-[9px] uppercase tracking-wide text-warn" title="Heuristic — verify against source">
+            heuristic
+          </span>
+        )}
+        <span className="shrink-0 text-muted transition group-open:rotate-90">›</span>
+      </summary>
+      <div className="space-y-2.5 px-2.5 pb-3 pt-1 text-[11px] leading-relaxed">
+        <div>
+          <div className="mb-0.5 text-[9px] font-semibold uppercase tracking-wide text-bad">Attack path</div>
+          <p className="text-ink/90">{f.attackPath}</p>
+        </div>
+        <div>
+          <div className="mb-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent">What it means for holders</div>
+          <p className="text-ink/90">{f.assessment}</p>
+        </div>
+        <div className="flex flex-wrap gap-1 pt-0.5">
+          {Object.entries(f.evidence)
+            .filter(([, v]) => v != null && v !== '' && v !== false)
+            .map(([k, v]) => (
+              <span key={k} className="rounded bg-panel px-1.5 py-0.5 font-mono text-[9px] text-muted">
+                {k}: {String(v)}
+              </span>
+            ))}
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -367,6 +491,42 @@ function DetailPanel({ row, onClose }: { row: Row; onClose: () => void }) {
         <Field label="Launched" value={ago(row.createdAt)} />
         <Field label="Block" value={row.createdBlock.toLocaleString()} />
       </dl>
+
+      {row.riskScore != null && (
+        <div className="border-t border-edge p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-[10px] uppercase tracking-wide text-muted">Contract risk</h3>
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${
+                RISK_TIER_STYLE[row.riskTier ?? 'clean'] ?? ''
+              }`}
+            >
+              {row.riskTier} · {row.riskScore}/100
+            </span>
+          </div>
+          {row.riskFindings && row.riskFindings.length ? (
+            <div className="space-y-1.5">
+              {row.riskFindings.map((f) => (
+                <FindingCard key={f.id} f={f} />
+              ))}
+            </div>
+          ) : row.riskFlags && row.riskFlags.length ? (
+            <ul className="flex flex-wrap gap-1.5">
+              {row.riskFlags.map((f) => (
+                <li key={f} className={`rounded px-1.5 py-0.5 text-[10px] ${flagStyle(f)}`}>
+                  {FLAG_META[f]?.label ?? f}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-xs text-muted">No dangerous capabilities detected.</div>
+          )}
+          <p className="mt-2 text-[10px] leading-relaxed text-muted">
+            Heuristic scan of the token bytecode. A flag means the capability EXISTS in the
+            contract — not that it was used. Verify before acting.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-3 p-4 text-xs">
         <LinkRow label="Token" addr={s.addr} />

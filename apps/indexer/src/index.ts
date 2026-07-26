@@ -106,6 +106,7 @@ async function runRiskForPools(
           lockedUsd,
           ownerAddress: a.ownerAddress,
           ownerActive: a.ownerActive,
+          code: a.vulns,
         },
         a.flags,
       );

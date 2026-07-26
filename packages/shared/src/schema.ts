@@ -65,6 +65,12 @@ export const pools = pgTable(
 
     passesThreshold: boolean('passes_threshold').default(false).notNull(),
 
+    // --- token risk / bug-bounty analysis (stage 4) ---
+    // Scored on the memecoin (non-quote) side of the pair.
+    riskScore: integer('risk_score'), // 0..100, null = not yet analyzed
+    riskTier: text('risk_tier'), // clean | low | medium | high | critical
+    riskFlags: jsonb('risk_flags').$type<string[]>(),
+
     scanRunId: integer('scan_run_id'),
     lastScannedBlock: bigint('last_scanned_block', { mode: 'number' }),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),

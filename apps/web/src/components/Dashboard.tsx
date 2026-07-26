@@ -386,6 +386,7 @@ const FLAG_META: Record<string, { label: string; sev: string }> = {
   OWNER_ACTIVE: { label: 'Owner not renounced', sev: 'med' },
   RENOUNCED: { label: 'Ownership renounced', sev: 'low' },
   NO_CODE: { label: 'No bytecode (dead)', sev: 'low' },
+  LP_POOL: { label: 'Uniswap/AMM LP pool (not a token)', sev: 'low' },
 };
 
 const SEV_STYLE: Record<string, string> = {
@@ -401,6 +402,16 @@ function flagStyle(f: string) {
 }
 
 function RiskCell({ row }: { row: Row }) {
+  if (row.riskFlags?.includes('LP_POOL')) {
+    return (
+      <span
+        className="rounded bg-muted/15 px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted"
+        title="Uniswap/AMM LP pool contract — not a token, not vuln-scanned"
+      >
+        lp
+      </span>
+    );
+  }
   if (row.riskScore == null || !row.riskTier) {
     return <span className="text-[10px] text-muted">—</span>;
   }
@@ -504,7 +515,14 @@ function DetailPanel({ row, onClose }: { row: Row; onClose: () => void }) {
               {row.riskTier} · {row.riskScore}/100
             </span>
           </div>
-          {row.riskFindings && row.riskFindings.length ? (
+          {row.riskFlags?.includes('LP_POOL') ? (
+            <div className="text-xs leading-relaxed text-muted">
+              The token side of this pair is itself a Uniswap/AMM{' '}
+              <span className="text-ink">LP / pool contract</span>, not a standard token — so
+              token-vulnerability scanning is skipped here. Its mint / burn / swap functions are normal
+              AMM mechanics, not bugs.
+            </div>
+          ) : row.riskFindings && row.riskFindings.length ? (
             <div className="space-y-1.5">
               {row.riskFindings.map((f) => (
                 <FindingCard key={f.id} f={f} />

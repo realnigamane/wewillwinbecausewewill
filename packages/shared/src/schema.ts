@@ -70,6 +70,8 @@ export const pools = pgTable(
     riskScore: integer('risk_score'), // 0..100, null = not yet analyzed
     riskTier: text('risk_tier'), // clean | low | medium | high | critical
     riskFlags: jsonb('risk_flags').$type<string[]>(),
+    /** Detailed per-contract findings (attack path + assessment) for the detail panel. */
+    riskFindings: jsonb('risk_findings'),
 
     scanRunId: integer('scan_run_id'),
     lastScannedBlock: bigint('last_scanned_block', { mode: 'number' }),

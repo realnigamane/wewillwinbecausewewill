@@ -123,6 +123,8 @@ export interface BytecodeAnalysis {
   hasCode: boolean;
   /** true = owner is a live address, false = renounced/dead, null = unknown. */
   ownerActive: boolean | null;
+  /** The resolved owner() address (or null if not read), kept for finding detail. */
+  ownerAddress: string | null;
   flags: string[];
   score: number; // 0..100
   tier: RiskTier;
@@ -183,7 +185,7 @@ export function riskTierOf(score: number): RiskTier {
 export function analyzeTokenBytecode(code: string, owner: string | null): BytecodeAnalysis {
   const hex = normHex(code);
   if (hex.length === 0) {
-    return { hasCode: false, ownerActive: null, flags: ['NO_CODE'], score: 0, tier: 'clean' };
+    return { hasCode: false, ownerActive: null, ownerAddress: owner, flags: ['NO_CODE'], score: 0, tier: 'clean' };
   }
 
   const ownerActive: boolean | null = owner == null ? null : !DEAD.has(owner.toLowerCase());
@@ -213,5 +215,5 @@ export function analyzeTokenBytecode(code: string, owner: string | null): Byteco
   if (ownerActive === true) flags.push('OWNER_ACTIVE');
   else if (ownerActive === false) flags.push('RENOUNCED');
 
-  return { hasCode: true, ownerActive, flags, score, tier: riskTierOf(score) };
+  return { hasCode: true, ownerActive, ownerAddress: owner, flags, score, tier: riskTierOf(score) };
 }

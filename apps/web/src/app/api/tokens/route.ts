@@ -24,6 +24,7 @@ export async function GET(req: Request) {
   const kind = p.get('kind'); // 'v2' | 'v3'
   const factory = p.get('factory');
   const before = p.get('before') ? Number(p.get('before')) : null; // created-block ceiling
+  const after = p.get('after') ? Number(p.get('after')) : null; // created-block floor (age band)
   const q = p.get('q'); // free-text on symbol / address
   const cursor = p.get('cursor') ? Number(p.get('cursor')) : null;
   const minRisk = p.get('minRisk') ? Number(p.get('minRisk')) : null;
@@ -35,6 +36,7 @@ export async function GET(req: Request) {
   if (kind) where.push(eq(pools.kind, kind));
   if (factory) where.push(eq(pools.factory, factory.toLowerCase()));
   if (before != null) where.push(lte(pools.createdBlock, before));
+  if (after != null) where.push(gte(pools.createdBlock, after));
   if (minRisk != null) where.push(gte(pools.riskScore, minRisk));
 
   // "Burned" is the strict, provable subset: LP at a dead address.

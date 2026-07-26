@@ -1,0 +1,81 @@
+name: Scan
+
+# Runs the full pre-2024 locked-liquidity scan on a GitHub-hosted runner and
+# writes survivors straight to Postgres. Nothing to install locally — trigger
+# it from the Actions tab (or the API) and watch the logs.
+on:
+  workflow_dispatch:
+    inputs:
+      min_usd:
+        description: 'Minimum locked liquidity in USD'
+        required: false
+        default: '100'
+      to_block:
+        description: 'Scan up to (exclusive) this block'
+        required: false
+        default: '18908895'
+      from_block:
+        description: 'Start block (0 for full history)'
+        required: false
+        default: '0'
+
+# A historical sweep is long-running; give it room. GitHub's hard cap is 6h.
+concurrency:
+  group: scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      ENVIO_API_TOKEN: ${{ secrets.ENVIO_API_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      RPC_URLS: ${{ secrets.RPC_URLS }}
+      MIN_LOCKED_USD: ${{ github.event.inputs.min_usd }}
+      END_BLOCK: ${{ github.event.inputs.to_block }}
+      # More cores -> more multicall concurrency. ubuntu-latest gives 4.
+      RPC_CONCURRENCY: '32'
+      LOG_LEVEL: info
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Preflight — required secrets
+        run: |
+          missing=0
+          for v in ENVIO_API_TOKEN DATABASE_URL RPC_URLS; do
+            if [ -z "${!v}" ]; then echo "::error::Missing secret $v"; missing=1; fi
+          done
+          [ "$missing" = "0" ] || { echo "Add the missing repo secrets under Settings → Secrets → Actions, then re-run."; exit 1; }
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Apply database schema
+        run: pnpm --filter @liqarch/indexer db:push
+
+      - name: Run scan
+        run: >
+          pnpm --filter @liqarch/indexer scan
+          --from ${{ github.event.inputs.from_block }}
+          --to ${{ github.event.inputs.to_block }}
+          --min-usd ${{ github.event.inputs.min_usd }}
+
+      # Discovery is the expensive stage; keep its output so a re-run can use
+      # --skip-discovery and only re-value/re-classify.
+      - name: Save discovery output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pools-ndjson
+          path: apps/indexer/data/pools.ndjson
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,63 @@
+name: Risk
+
+# Bug-bounty pass: classify each surviving token's contract for rug/honeypot
+# capability (mint, blacklist, fee control, trading toggle, proxy, self-destruct,
+# active owner). Read-only on-chain analysis — no exploitation. Run it after a
+# Scan to backfill risk onto the survivors already in the database.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: risk
+  cancel-in-progress: false
+
+jobs:
+  risk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      RPC_URLS: ${{ secrets.RPC_URLS }}
+      DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+      NEON_ENV: ${{ secrets.NEON_ENV }}
+      RPC_CONCURRENCY: '32'
+      LOG_LEVEL: info
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve DATABASE_URL
+        run: |
+          python3 - <<'PY'
+          import os, re
+          direct = (os.environ.get('DATABASE_URL_SECRET') or '').strip()
+          blob   = os.environ.get('NEON_ENV') or ''
+          def pick(name):
+              m = re.search(rf'^{name}\s*=\s*(\S+)', blob, re.M)
+              return m.group(1).strip().strip('"').strip("'") if m else ''
+          url = direct or pick('DATABASE_URL_UNPOOLED') or pick('DATABASE_URL')
+          if not url.startswith('postgres'):
+              raise SystemExit('::error::No usable postgres connection string found. '
+                               'Add secret DATABASE_URL, or paste the Neon .env block into secret NEON_ENV.')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('DATABASE_URL=' + url + '\n')
+          PY
+
+      - name: Preflight — required secrets
+        run: |
+          missing=0
+          for v in RPC_URLS DATABASE_URL; do
+            if [ -z "${!v}" ]; then echo "::error::Missing $v"; missing=1; fi
+          done
+          [ "$missing" = "0" ] || { echo "Add the missing repo secrets under Settings → Secrets → Actions."; exit 1; }
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Apply database schema
+        run: pnpm --filter @liqarch/indexer db:push
+
+      - name: Analyze token risk
+        run: pnpm --filter @liqarch/indexer analyze-risk

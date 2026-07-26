@@ -70,11 +70,12 @@ export interface RiskUpdate {
   riskScore: number;
   riskTier: string;
   riskFlags: string[];
+  riskFindings: unknown[];
 }
 
 /** Load survivors so risk analysis can backfill them without re-scanning. */
 export async function loadPassingPools(): Promise<
-  { address: string; token0: string; token1: string; quoteSide: number | null }[]
+  { address: string; token0: string; token1: string; quoteSide: number | null; lockedLiquidityUsd: number | null }[]
 > {
   return db()
     .select({
@@ -82,6 +83,7 @@ export async function loadPassingPools(): Promise<
       token0: pools.token0,
       token1: pools.token1,
       quoteSide: pools.quoteSide,
+      lockedLiquidityUsd: pools.lockedLiquidityUsd,
     })
     .from(pools)
     .where(sql`${pools.passesThreshold} = true`);
@@ -98,14 +100,15 @@ export async function persistRisk(updates: RiskUpdate[]) {
       (u) =>
         sql`(${u.address.toLowerCase()}, ${u.riskScore}::int, ${u.riskTier}::text, ${JSON.stringify(
           u.riskFlags,
-        )}::jsonb)`,
+        )}::jsonb, ${JSON.stringify(u.riskFindings)}::jsonb)`,
     );
     await d.execute(sql`
       update ${pools} as p set
-        risk_score = v.score,
-        risk_tier  = v.tier,
-        risk_flags = v.flags
-      from (values ${sql.join(rows, sql`, `)}) as v(address, score, tier, flags)
+        risk_score    = v.score,
+        risk_tier     = v.tier,
+        risk_flags    = v.flags,
+        risk_findings = v.findings
+      from (values ${sql.join(rows, sql`, `)}) as v(address, score, tier, flags, findings)
       where p.address = v.address
     `);
   }

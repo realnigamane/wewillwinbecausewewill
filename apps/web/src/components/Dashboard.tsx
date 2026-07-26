@@ -66,10 +66,19 @@ interface Filters {
   lockType: string;
   kind: string;
   minRisk: number;
+  ageBand: string;
   q: string;
 }
 
-const DEFAULTS: Filters = { minUsd: 100, maxUsd: '', minLockedPct: 0, lockType: '', kind: '', minRisk: 0, q: '' };
+const DEFAULTS: Filters = { minUsd: 100, maxUsd: '', minLockedPct: 0, lockType: '', kind: '', minRisk: 0, ageBand: '', q: '' };
+
+// created-block ranges by approximate age (as of 2026). AMM pools start ~block
+// 10,000,835 (Uniswap V2, May 2020), so "6-8 yrs" is really the earliest V2 pools.
+const AGE_BANDS: Record<string, { after: number; before: number }> = {
+  '6-8': { after: 6_000_000, before: 10_530_000 }, // ~2018 → Jul 2020
+  '4-6': { after: 10_530_000, before: 15_200_000 }, // Jul 2020 → Jul 2022
+  '2-4': { after: 15_200_000, before: 18_908_895 }, // Jul 2022 → end 2023
+};
 
 export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; stats: Record<string, number> }) {
   const [filters, setFilters] = useState<Filters>(DEFAULTS);
@@ -89,6 +98,11 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
     if (filters.lockType) p.set('lockType', filters.lockType);
     if (filters.kind) p.set('kind', filters.kind);
     if (filters.minRisk) p.set('minRisk', String(filters.minRisk));
+    const band = AGE_BANDS[filters.ageBand];
+    if (band) {
+      p.set('after', String(band.after));
+      p.set('before', String(band.before));
+    }
     if (filters.q) p.set('q', filters.q);
     return p.toString();
   }, [filters]);
@@ -321,6 +335,17 @@ function FilterBar({
         <option value={15}>medium+ risk</option>
         <option value={32}>high+ risk</option>
         <option value={55}>critical only</option>
+      </select>
+      <select
+        value={filters.ageBand}
+        onChange={(e) => set('ageBand', e.target.value)}
+        className="rounded border border-edge bg-base px-2 py-1.5 outline-none focus:border-accent"
+        title="Filter by how long ago the pool launched"
+      >
+        <option value="">any age</option>
+        <option value="6-8">6–8 yrs old</option>
+        <option value="4-6">4–6 yrs old</option>
+        <option value="2-4">2–4 yrs old</option>
       </select>
       <span className="ml-auto tnum text-muted">
         {loading ? 'querying…' : `${count.toLocaleString()} loaded`}

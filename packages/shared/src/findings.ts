@@ -368,6 +368,9 @@ const OWNER_GATED = ['SET_BALANCE', 'MINT', 'BLACKLIST', 'TRADING_TOGGLE', 'FEE_
  */
 export function generateFindings(ctx: FindingContext, flags: string[]): Finding[] {
   const set = new Set(flags);
+  // AMM/LP pool contracts and codeless addresses are not token contracts — no
+  // token-vulnerability findings apply.
+  if (set.has('LP_POOL') || set.has('NO_CODE')) return [];
   const out: Finding[] = [];
 
   for (const cls of OWNER_GATED) {

@@ -293,6 +293,33 @@ export interface CodeVulns {
  * Derive the non-owner-exploit signals for a contract.
  * @param classSelectors  map of risk CLASS -> its selectors (with 0x prefix)
  */
+/**
+ * Is this bytecode a Uniswap-style AMM pool / pair rather than a plain token?
+ *
+ * A Uniswap V2 pair is ITSELF an ERC-20 LP token, so when a pool's non-quote
+ * side happens to be an LP token, we'd otherwise disassemble the pair and flag
+ * its perfectly-normal mint/burn/swap functions as "vulnerabilities". These
+ * markers — getReserves(), MINIMUM_LIQUIDITY(), kLast(), and V3's slot0() —
+ * essentially never appear in an ordinary token contract, so they cleanly
+ * identify a pool/pair that should be excluded from token-vuln analysis.
+ */
+export function looksLikeAmmPool(codeHex: string): boolean {
+  const h = (codeHex || '').toLowerCase();
+  const has = (s: string) => h.includes(s);
+  const token0 = has('0dfe1681'); // token0()
+  const token1 = has('d21220a7'); // token1()
+  const getReserves = has('0902f1ac');
+  const swap = has('022c0d9f'); // swap(uint256,uint256,address,bytes)
+  const sync = has('fff6cae9');
+  const slot0 = has('3850c7bd'); // V3 pool
+  const minLiq = has('ba9a7a56'); // MINIMUM_LIQUIDITY()
+  const kLast = has('7464fc3d');
+  if (getReserves && swap) return true; // conclusively a V2 pair
+  if (slot0 && token0 && token1) return true; // V3 pool
+  if (token0 && token1 && (getReserves || sync || minLiq || kLast)) return true;
+  return false;
+}
+
 export function deriveVulns(codeHex: string, classSelectors: Record<string, string[]>): CodeVulns {
   const allSels = [
     ...new Set([...Object.values(classSelectors).flat(), ...Object.keys(GUARD_CHECK_SELECTORS)].map((s) => s.toLowerCase())),

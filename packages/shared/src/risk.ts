@@ -26,7 +26,7 @@
  * failure direction for a risk tool.
  */
 import { BURN_ADDRESSES } from './constants';
-import { deriveVulns, type CodeVulns } from './disasm';
+import { deriveVulns, looksLikeAmmPool, type CodeVulns } from './disasm';
 
 export type RiskSeverity = 'low' | 'med' | 'high' | 'crit';
 export type RiskTier = 'clean' | 'low' | 'medium' | 'high' | 'critical';
@@ -58,7 +58,9 @@ export const RISK_CATEGORIES: RiskCategory[] = [
     label: 'Mintable supply',
     severity: 'high',
     weight: 22,
-    selectors: ['40c10f19', 'a0712d68', '6a627842'], // mint(address,uint256) / mint(uint256) / mint(address)
+    // mint(address,uint256) / mint(uint256). Deliberately NOT mint(address)=0x6a627842:
+    // that is the Uniswap V2 pair's mint(to) — an AMM mechanic, not a token mint.
+    selectors: ['40c10f19', 'a0712d68'],
   },
   {
     flag: 'BLACKLIST',
@@ -202,6 +204,13 @@ export function analyzeTokenBytecode(code: string, owner: string | null): Byteco
   const hex = normHex(code);
   if (hex.length === 0) {
     return { hasCode: false, ownerActive: null, ownerAddress: owner, flags: ['NO_CODE'], score: 0, tier: 'clean', vulns: EMPTY_VULNS };
+  }
+
+  // AMM/LP pool contracts (a Uniswap V2 pair is itself an ERC-20 LP token) are
+  // NOT token launches — mint/burn/swap are normal mechanics, not bugs. Skip
+  // vuln analysis entirely so a pool is never reported as a vulnerable "token".
+  if (looksLikeAmmPool(code)) {
+    return { hasCode: true, ownerActive: null, ownerAddress: null, flags: ['LP_POOL'], score: 0, tier: 'clean', vulns: EMPTY_VULNS };
   }
 
   const ownerActive: boolean | null = owner == null ? null : !DEAD.has(owner.toLowerCase());

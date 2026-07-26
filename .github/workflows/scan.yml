@@ -2,7 +2,7 @@ name: Scan
 
 # Runs the full pre-2024 locked-liquidity scan on a GitHub-hosted runner and
 # writes survivors straight to Postgres. Nothing to install locally — trigger
-# it from the Actions tab (or the API) and watch the logs.
+# it from the Actions tab and watch the logs.
 on:
   workflow_dispatch:
     inputs:
@@ -19,7 +19,6 @@ on:
         required: false
         default: '0'
 
-# A historical sweep is long-running; give it room. GitHub's hard cap is 6h.
 concurrency:
   group: scan
   cancel-in-progress: false
@@ -30,11 +29,14 @@ jobs:
     timeout-minutes: 350
     env:
       ENVIO_API_TOKEN: ${{ secrets.ENVIO_API_TOKEN }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
       RPC_URLS: ${{ secrets.RPC_URLS }}
+      # Accept either a direct DATABASE_URL secret, or the whole Neon .env block
+      # pasted verbatim (from Vercel's "Copy Snippet"). The resolve step below
+      # extracts a usable connection string from whichever is provided.
+      DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+      NEON_ENV: ${{ secrets.NEON_ENV }}
       MIN_LOCKED_USD: ${{ github.event.inputs.min_usd }}
       END_BLOCK: ${{ github.event.inputs.to_block }}
-      # More cores -> more multicall concurrency. ubuntu-latest gives 4.
       RPC_CONCURRENCY: '32'
       LOG_LEVEL: info
     steps:
@@ -48,11 +50,32 @@ jobs:
         with:
           node-version: 22
 
+      - name: Resolve DATABASE_URL
+        run: |
+          python3 - <<'PY'
+          import os, re
+          direct = (os.environ.get('DATABASE_URL_SECRET') or '').strip()
+          blob   = os.environ.get('NEON_ENV') or ''
+          def pick(name):
+              m = re.search(rf'^{name}\s*=\s*(\S+)', blob, re.M)
+              return m.group(1).strip().strip('"').strip("'") if m else ''
+          # Prefer an explicit DATABASE_URL secret; otherwise pull the direct
+          # (unpooled) connection from the pasted block, falling back to pooled.
+          url = direct or pick('DATABASE_URL_UNPOOLED') or pick('DATABASE_URL')
+          if not url.startswith('postgres'):
+              raise SystemExit('::error::No usable postgres connection string found. '
+                               'Add secret DATABASE_URL, or paste the Neon .env block into secret NEON_ENV.')
+          safe = re.sub(r'://[^@]+@', '://***:***@', url)
+          print('Resolved connection ->', safe[:80])
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('DATABASE_URL=' + url + '\n')
+          PY
+
       - name: Preflight — required secrets
         run: |
           missing=0
-          for v in ENVIO_API_TOKEN DATABASE_URL RPC_URLS; do
-            if [ -z "${!v}" ]; then echo "::error::Missing secret $v"; missing=1; fi
+          for v in ENVIO_API_TOKEN RPC_URLS DATABASE_URL; do
+            if [ -z "${!v}" ]; then echo "::error::Missing $v"; missing=1; fi
           done
           [ "$missing" = "0" ] || { echo "Add the missing repo secrets under Settings → Secrets → Actions, then re-run."; exit 1; }
 
@@ -69,8 +92,6 @@ jobs:
           --to ${{ github.event.inputs.to_block }}
           --min-usd ${{ github.event.inputs.min_usd }}
 
-      # Discovery is the expensive stage; keep its output so a re-run can use
-      # --skip-discovery and only re-value/re-classify.
       - name: Save discovery output
         if: always()
         uses: actions/upload-artifact@v4

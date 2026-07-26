@@ -174,7 +174,11 @@ if (!main) {
   console.error(`Unknown command "${cmd}". Try: scan | verify-lockers`);
   process.exit(1);
 }
-main().catch((e) => {
-  logger.error(e.stack ?? String(e));
-  process.exit(1);
-});
+// Force a clean exit. The HyperSync client and postgres pool keep open handles
+// that otherwise keep the process alive for minutes after work is done.
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    logger.error(e.stack ?? String(e));
+    process.exit(1);
+  });

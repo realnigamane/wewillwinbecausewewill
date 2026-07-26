@@ -78,9 +78,11 @@ export class MulticallEngine {
           retryCount: 3,
           retryDelay: 250,
           timeout: 30_000,
-          // Coalesce up to 100 concurrent getCode requests into one POST,
-          // waiting 20ms to let a batch fill.
-          batch: { wait: 20, batchSize: 100 },
+          // JSON-RPC request batching is intentionally OFF. dRPC (and some other
+          // providers) mishandle batched eth_getCode and return EMPTY results —
+          // which silently made every token look codeless ("NO_CODE"), scoring
+          // the entire dataset "clean". Plain per-request getCode at high
+          // concurrency is fast enough on a keyed endpoint, and it is correct.
         }),
       }),
     );

@@ -23,13 +23,14 @@
 import 'dotenv/config';
 import { readFileSync, existsSync, mkdirSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { PRE_2024_END_BLOCK, LOCKERS } from '@liqarch/shared';
+import { PRE_2024_END_BLOCK, LOCKERS, QUOTE_ASSETS } from '@liqarch/shared';
 import { MulticallEngine } from './lib/multicall.js';
 import { logger } from './lib/log.js';
 import { discover } from './stages/01-discover.js';
 import { valueV2Pools, getEthPriceUsd } from './stages/02-value.js';
 import { reconstructLpHolders, analyzeLocks } from './stages/03-locks.js';
-import { persist, startRun, finishRun, failRun, updateRunProgress } from './lib/db.js';
+import { analyzeTokenRisk } from './stages/04-risk.js';
+import { persist, startRun, finishRun, failRun, updateRunProgress, persistRisk, loadPassingPools } from './lib/db.js';
 import type { DiscoveredPool } from './lib/types.js';
 
 const args = process.argv.slice(2);
@@ -59,6 +60,33 @@ async function readPools(path: string): Promise<DiscoveredPool[]> {
     if (line.trim()) pools.push(JSON.parse(line));
   }
   return pools;
+}
+
+/** The token under scrutiny is whichever side isn't the priceable quote asset. */
+function memeSide(r: { token0: string; token1: string; quoteSide: number | null }): string {
+  if (r.quoteSide === 0) return r.token1;
+  if (r.quoteSide === 1) return r.token0;
+  return QUOTE_ASSETS[r.token0] ? r.token1 : r.token0;
+}
+
+/** Classify the memecoin side of each pool for rug/honeypot risk and write it back. */
+async function runRiskForPools(
+  mc: MulticallEngine,
+  rows: { address: string; token0: string; token1: string; quoteSide: number | null }[],
+): Promise<number> {
+  const targets = rows.map((r) => ({ pool: r.address, token: memeSide(r).toLowerCase() }));
+  const analysis = await analyzeTokenRisk(
+    mc,
+    targets.map((t) => t.token),
+  );
+  const updates = targets
+    .map(({ pool, token }) => {
+      const a = analysis.get(token);
+      return a ? { address: pool, riskScore: a.score, riskTier: a.tier, riskFlags: a.flags } : null;
+    })
+    .filter((u): u is NonNullable<typeof u> => u !== null);
+  await persistRisk(updates);
+  return updates.length;
 }
 
 async function scan() {
@@ -135,6 +163,13 @@ async function scan() {
       if (chunkResults.length) {
         await persist(chunkResults, runId);
         passing += chunkResults.length;
+        // Bug-bounty pass: classify each survivor's memecoin contract for rug/
+        // honeypot capability. Non-fatal — a risk hiccup must not lose the scan.
+        try {
+          await runRiskForPools(mc, chunkResults);
+        } catch (e) {
+          logger.warn(`risk step skipped for chunk: ${(e as Error).message}`);
+        }
       }
 
       const analysed = Math.min(i + CHUNK, valued.length);
@@ -193,7 +228,29 @@ async function verifyLockers() {
   logger.info('only improves labelling, never coverage.');
 }
 
-const main = { scan, 'verify-lockers': verifyLockers }[cmd];
+/**
+ * Backfill rug/honeypot risk classification over every stored survivor without
+ * re-scanning. Idempotent — safe to re-run after adding new detectors.
+ */
+async function analyzeRisk() {
+  const mc = new MulticallEngine(rpcUrls(), {
+    concurrency: Number(process.env.RPC_CONCURRENCY ?? 24),
+    batchSize: Number(process.env.MULTICALL_BATCH_SIZE ?? 400),
+  });
+  const passing = await loadPassingPools();
+  logger.info(`risk backfill: ${passing.length.toLocaleString()} survivors to analyze`);
+  const CHUNK = 500;
+  let done = 0;
+  for (let i = 0; i < passing.length; i += CHUNK) {
+    const chunk = passing.slice(i, i + CHUNK);
+    await runRiskForPools(mc, chunk);
+    done += chunk.length;
+    logger.info(`  risk ${done.toLocaleString()}/${passing.length.toLocaleString()}`);
+  }
+  logger.info(`risk backfill complete: ${done.toLocaleString()} tokens analyzed`);
+}
+
+const main = { scan, 'verify-lockers': verifyLockers, 'analyze-risk': analyzeRisk }[cmd];
 if (!main) {
   console.error(`Unknown command "${cmd}". Try: scan | verify-lockers`);
   process.exit(1);

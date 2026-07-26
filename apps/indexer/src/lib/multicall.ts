@@ -221,4 +221,28 @@ export class MulticallEngine {
     );
     return out;
   }
+
+  /**
+   * Full runtime bytecode per address, batched (JSON-RPC batching on). Risk
+   * analysis scans this for dangerous function selectors. Returns '0x' for
+   * addresses with no code, '' when the fetch itself failed.
+   */
+  async getCodes(addresses: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const lim = pLimit(this.codeConcurrency);
+    await Promise.all(
+      addresses.map((addr) =>
+        lim(async () => {
+          const client = this.codeClients[this.codeCursor++ % this.codeClients.length];
+          try {
+            const code = await client.getCode({ address: addr as `0x${string}` });
+            out.set(addr.toLowerCase(), code ?? '0x');
+          } catch {
+            out.set(addr.toLowerCase(), '');
+          }
+        }),
+      ),
+    );
+    return out;
+  }
 }

@@ -63,6 +63,54 @@ export async function failRun(id: number, error: string) {
     .where(sql`${scanRuns.id} = ${id}`);
 }
 
+// --- token risk (stage 4) --------------------------------------------------
+
+export interface RiskUpdate {
+  address: string; // pool address
+  riskScore: number;
+  riskTier: string;
+  riskFlags: string[];
+}
+
+/** Load survivors so risk analysis can backfill them without re-scanning. */
+export async function loadPassingPools(): Promise<
+  { address: string; token0: string; token1: string; quoteSide: number | null }[]
+> {
+  return db()
+    .select({
+      address: pools.address,
+      token0: pools.token0,
+      token1: pools.token1,
+      quoteSide: pools.quoteSide,
+    })
+    .from(pools)
+    .where(sql`${pools.passesThreshold} = true`);
+}
+
+/** Bulk-write risk fields onto existing pool rows (one UPDATE ... FROM VALUES per chunk). */
+export async function persistRisk(updates: RiskUpdate[]) {
+  if (updates.length === 0) return;
+  const d = db();
+  const CH = 500;
+  for (let i = 0; i < updates.length; i += CH) {
+    const slice = updates.slice(i, i + CH);
+    const rows = slice.map(
+      (u) =>
+        sql`(${u.address.toLowerCase()}, ${u.riskScore}::int, ${u.riskTier}::text, ${JSON.stringify(
+          u.riskFlags,
+        )}::jsonb)`,
+    );
+    await d.execute(sql`
+      update ${pools} as p set
+        risk_score = v.score,
+        risk_tier  = v.tier,
+        risk_flags = v.flags
+      from (values ${sql.join(rows, sql`, `)}) as v(address, score, tier, flags)
+      where p.address = v.address
+    `);
+  }
+}
+
 const CHUNK = 500;
 
 export async function persist(results: PoolWithLocks[], scanRunId: number) {

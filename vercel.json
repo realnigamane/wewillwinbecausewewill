@@ -1,6 +1,1 @@
-{
-  "buildCommand": "pnpm --filter @liqarch/web build",
-  "outputDirectory": "apps/web/.next",
-  "installCommand": "pnpm install",
-  "framework": "nextjs"
-}
+{ "framework": "nextjs" }

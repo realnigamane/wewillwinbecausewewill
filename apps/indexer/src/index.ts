@@ -29,7 +29,7 @@ import { logger } from './lib/log.js';
 import { discover } from './stages/01-discover.js';
 import { valueV2Pools, getEthPriceUsd } from './stages/02-value.js';
 import { reconstructLpHolders, analyzeLocks } from './stages/03-locks.js';
-import { persist, startRun, finishRun, failRun } from './lib/db.js';
+import { persist, startRun, finishRun, failRun, updateRunProgress } from './lib/db.js';
 import type { DiscoveredPool } from './lib/types.js';
 
 const args = process.argv.slice(2);
@@ -118,20 +118,44 @@ async function scan() {
       },
     });
 
-    // ---- Stage 3: lock analysis ---------------------------------------
-    const balances = await reconstructLpHolders(valued, {
-      toBlock: endBlock,
-      onProgress: (done, total) => logger.info(`  lp replay ${done.toLocaleString()}/${total.toLocaleString()}`),
-    });
+    // ---- Stage 3: lock analysis + INCREMENTAL persist -----------------
+    // Process survivors in chunks all the way through (LP replay ->
+    // classification -> DB write) so results land in Postgres AS THEY ARE
+    // FOUND. The dashboard fills live, and a run that's cancelled or times
+    // out still leaves everything it found up to that point — instead of
+    // losing the whole scan to an all-at-the-end write.
+    const CHUNK = 400;
+    let passing = 0;
+    for (let i = 0; i < valued.length; i += CHUNK) {
+      const chunk = valued.slice(i, i + CHUNK);
 
-    const results = await analyzeLocks(mc, valued, balances, { minLockedUsd });
+      const balances = await reconstructLpHolders(chunk, { toBlock: endBlock });
+      const chunkResults = await analyzeLocks(mc, chunk, balances, { minLockedUsd });
 
-    // ---- Persist -------------------------------------------------------
-    await persist(results, runId);
+      if (chunkResults.length) {
+        await persist(chunkResults, runId);
+        passing += chunkResults.length;
+      }
+
+      const analysed = Math.min(i + CHUNK, valued.length);
+      // Update the run row so the dashboard's live counters move mid-scan.
+      await updateRunProgress(runId, {
+        stage: 'lock-analysis',
+        poolsDiscovered: pools.length,
+        poolsPriced: analysed,
+        poolsPassing: passing,
+        ethPriceUsd,
+      });
+      logger.info(
+        `  progress: ${analysed.toLocaleString()}/${valued.length.toLocaleString()} analysed, ` +
+          `${passing.toLocaleString()} passing so far`,
+      );
+    }
+
     await finishRun(runId, {
       poolsDiscovered: pools.length,
       poolsPriced: valued.length,
-      poolsPassing: results.length,
+      poolsPassing: passing,
       ethPriceUsd,
       timings: { totalMs: Date.now() - t0 },
     });
@@ -141,7 +165,7 @@ async function scan() {
     logger.info(`DONE in ${mins} min`);
     logger.info(`  discovered : ${pools.length.toLocaleString()}`);
     logger.info(`  priced     : ${valued.length.toLocaleString()}`);
-    logger.info(`  passing    : ${results.length.toLocaleString()}  (>= $${minLockedUsd} locked)`);
+    logger.info(`  passing    : ${passing.toLocaleString()}  (>= $${minLockedUsd} locked)`);
   } catch (err) {
     await failRun(runId, (err as Error).message);
     throw err;

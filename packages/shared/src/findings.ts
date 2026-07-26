@@ -312,6 +312,54 @@ function reentrancyFinding(ctx: FindingContext): Finding | null {
   };
 }
 
+function upgradeFinding(ctx: FindingContext): Finding | null {
+  const sig = ctx.code?.unguardedUpgrade;
+  if (!sig) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'UNGUARDED_UPGRADE',
+    class: 'UNGUARDED_UPGRADE',
+    title: `Anyone can call ${sig} and replace the contract's code`,
+    severity: 'critical',
+    confidence: 'heuristic',
+    evidence: { function: sig, token: ctx.token, pool: ctx.pool },
+    attackPath: `WHAT: ${sig} repoints this (proxy) token at a new implementation address, and the disassembly finds no msg.sender check before it. WHY IT WORKS: the upgrade path is meant to be admin-only; unguarded, anyone can repoint the proxy. The proxy keeps ${S}'s balances and storage but runs WHOEVER'S code the caller supplies. HOW A RANDOM PERSON DOES IT: deploy their OWN implementation contract — one whose functions mint them the whole supply, or a drain() that sends the pool to them — then call ${sig} with that address. ${S} now literally executes the attacker's logic over the real holders' balances, and they sweep ${money(ctx.lockedUsd)} at ${ctx.pool}. This is the most complete takeover there is. PREVENTION: gate the upgrade with onlyOwner / a ProxyAdmin behind a timelock (OpenZeppelin TransparentUpgradeableProxy, or UUPS with a real _authorizeUpgrade).`,
+    assessment: `Critical — full takeover. If ${sig} is open, ${S}'s code can be swapped for a stranger's at will, so nothing about the token is trustworthy. Do not hold. VERIFY: does ${sig} appear on Etherscan's Write tab and revert for a non-admin caller?`,
+  };
+}
+
+function arbitraryDelegatecallFinding(ctx: FindingContext): Finding | null {
+  const sig = ctx.code?.arbitraryDelegatecall;
+  if (!sig) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'ARBITRARY_DELEGATECALL',
+    class: 'ARBITRARY_DELEGATECALL',
+    title: `A callable function delegatecalls with no caller check (${sig})`,
+    severity: 'critical',
+    confidence: 'heuristic',
+    evidence: { function: sig, token: ctx.token, pool: ctx.pool },
+    attackPath: `WHAT: ${sig} performs a DELEGATECALL and the disassembly finds no msg.sender check guarding it. WHY IT WORKS: delegatecall runs the target contract's code INSIDE ${S}'s own storage and with ${S}'s balances — as if that code were part of the token. If the target is caller-supplied and unguarded, the attacker chooses the code. HOW A RANDOM PERSON DOES IT: deploy a tiny contract whose function does exactly what they want — set themselves as owner, mint themselves the supply, approve themselves ${S}'s holdings, or self-destruct it — then call ${sig} pointing at that contract. ${S} delegatecalls into it and runs the attacker's code against the real token state, then they drain ${money(ctx.lockedUsd)} at ${ctx.pool}. This is the "deploy a contract and interact in an unintended way" class at its most severe. PREVENTION: never delegatecall a caller-supplied address; restrict delegatecall to a fixed, audited implementation and gate the entrypoint with onlyOwner.`,
+    assessment: `Critical: a stranger's contract can execute as ${S} itself. Everything the token can touch is reachable. Treat as fully compromised until proven otherwise. VERIFY: read ${sig} — is the delegatecall target caller-controlled, and is there any access check?`,
+  };
+}
+
+function burnFromFinding(ctx: FindingContext): Finding | null {
+  const sig = ctx.code?.publicBurnFrom;
+  if (!sig) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'PUBLIC_BURN_FROM',
+    class: 'PUBLIC_BURN_FROM',
+    title: `Anyone may be able to burn others' ${S} via ${sig}`,
+    severity: 'high',
+    confidence: 'heuristic',
+    evidence: { function: sig, token: ctx.token },
+    attackPath: `WHAT: ${sig} reduces a target address's balance, and the disassembly finds no caller/allowance check before that write. WHY IT WORKS: burnFrom is supposed to require the caller be approved to spend that balance; without the check, "from" is just a parameter anyone can set. HOW A RANDOM PERSON DOES IT: call ${sig} with any victim's address to destroy their ${S} — grief a rival, or burn everyone but themselves to corner the supply, then sell into ${money(ctx.lockedUsd)} at ${ctx.pool}. PREVENTION: spend the caller's allowance first — _spendAllowance(from, msg.sender, amount) before _burn — exactly as OpenZeppelin's ERC20Burnable does.`,
+    assessment: `High: ${S} balances may be destroyable by anyone, not just their holder — that breaks the token's most basic guarantee. VERIFY: read ${sig} for an allowance/caller check before it burns.`,
+  };
+}
+
 const OWNER_GATED = ['SET_BALANCE', 'MINT', 'BLACKLIST', 'TRADING_TOGGLE', 'FEE_CTRL', 'PAUSABLE', 'MAXTX'];
 
 /**
@@ -347,6 +395,12 @@ export function generateFindings(ctx: FindingContext, flags: string[]): Finding[
   if (txo) out.push(txo);
   const re = reentrancyFinding(ctx);
   if (re) out.push(re);
+  const up = upgradeFinding(ctx);
+  if (up) out.push(up);
+  const adc = arbitraryDelegatecallFinding(ctx);
+  if (adc) out.push(adc);
+  const bfr = burnFromFinding(ctx);
+  if (bfr) out.push(bfr);
 
   const oc = ownerContextFinding(ctx);
   if (oc) out.push(oc);

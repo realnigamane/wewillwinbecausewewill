@@ -140,6 +140,9 @@ const EMPTY_VULNS: CodeVulns = {
   reentrancy: [],
   unguardedOwnershipXfer: null,
   txOriginAuth: null,
+  unguardedUpgrade: null,
+  publicBurnFrom: null,
+  arbitraryDelegatecall: null,
   analyzable: false,
 };
 
@@ -227,9 +230,16 @@ export function analyzeTokenBytecode(code: string, owner: string | null): Byteco
 
   // Anyone-can-exploit bugs dominate: these are open doors, not "trust the dev".
   const hasUnguarded = Object.values(vulns.guard).some((g) => g === false);
-  if (hasUnguarded || vulns.unprotectedInit || vulns.publicSelfdestruct || vulns.unguardedOwnershipXfer) {
+  if (
+    hasUnguarded ||
+    vulns.unprotectedInit ||
+    vulns.publicSelfdestruct ||
+    vulns.unguardedOwnershipXfer ||
+    vulns.unguardedUpgrade ||
+    vulns.arbitraryDelegatecall
+  ) {
     score = Math.max(score, 75);
-  } else if (vulns.txOriginAuth) {
+  } else if (vulns.publicBurnFrom || vulns.txOriginAuth) {
     score = Math.max(score, 55);
   } else if (vulns.reentrancy.length) {
     score = Math.max(score, 50);

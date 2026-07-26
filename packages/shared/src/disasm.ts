@@ -106,6 +106,8 @@ export interface HandlerAnalysis {
   stateChangeAfterCall: boolean; // reentrancy surface
   reachesSelfdestruct: boolean;
   usesTxOrigin: boolean; // tx.origin seen — spoofable auth if used as a guard
+  usesCaller: boolean; // CALLER seen anywhere — a msg.sender check likely exists
+  hasDelegatecall: boolean; // this function delegatecalls — arbitrary code surface
 }
 
 /**
@@ -120,6 +122,8 @@ export function analyzeHandler(instrs: Instr[], byPc: Map<number, number>, start
     stateChangeAfterCall: false,
     reachesSelfdestruct: false,
     usesTxOrigin: false,
+    usesCaller: false,
+    hasDelegatecall: false,
   };
   const seen = new Set<number>();
   const stack: { pc: number; caller: boolean; called: boolean }[] = [{ pc: startPc, caller: false, called: false }];
@@ -138,8 +142,10 @@ export function analyzeHandler(instrs: Instr[], byPc: Map<number, number>, start
       seen.add(ins.pc);
       const op = ins.op;
 
-      if (op === OP.CALLER) callerSeen = true;
-      else if (op === OP.ORIGIN) res.usesTxOrigin = true;
+      if (op === OP.CALLER) {
+        callerSeen = true;
+        res.usesCaller = true;
+      } else if (op === OP.ORIGIN) res.usesTxOrigin = true;
       else if (op === OP.SSTORE) {
         res.writesState = true;
         if (callerSeen) res.callerBeforeWrite = true;
@@ -147,6 +153,7 @@ export function analyzeHandler(instrs: Instr[], byPc: Map<number, number>, start
       } else if (op === OP.CALL || op === OP.CALLCODE || op === OP.DELEGATECALL) {
         res.hasExternalCall = true;
         called = true;
+        if (op === OP.DELEGATECALL) res.hasDelegatecall = true;
       } else if (op === OP.SELFDESTRUCT) {
         res.reachesSelfdestruct = true;
       }
@@ -178,6 +185,8 @@ export interface ContractAnalysis {
   hasSelfdestruct: boolean;
   /** dispatcher was parseable at all */
   dispatchFound: boolean;
+  /** a NAMED (dispatched) function that delegatecalls — arbitrary-code surface */
+  namedDelegatecall: { sel: string; guarded: boolean } | null;
 }
 
 /**
@@ -194,7 +203,27 @@ export function analyzeContract(codeHex: string, selectors: string[]): ContractA
     fns[sel.toLowerCase()] = pc != null ? analyzeHandler(instrs, byPc, pc) : undefined;
   }
   const hasSelfdestruct = instrs.some((i) => i.op === OP.SELFDESTRUCT);
-  return { fns, hasSelfdestruct, dispatchFound: dispatch.size > 0 };
+
+  // Only hunt for a named delegatecall function when a DELEGATECALL exists at all
+  // (skips the per-function scan for the vast majority of tokens, which never
+  // delegatecall). A NAMED function that delegatecalls is the arbitrary-code
+  // surface — distinct from a proxy's fallback, which has no selector.
+  let namedDelegatecall: { sel: string; guarded: boolean } | null = null;
+  if (instrs.some((i) => i.op === OP.DELEGATECALL)) {
+    let cnt = 0;
+    for (const [sel, pc] of dispatch) {
+      if (cnt++ > 96) break;
+      const a = analyzeHandler(instrs, byPc, pc);
+      if (!a.hasDelegatecall) continue;
+      if (!a.usesCaller && !a.usesTxOrigin) {
+        namedDelegatecall = { sel, guarded: false };
+        break;
+      }
+      if (!namedDelegatecall) namedDelegatecall = { sel, guarded: true };
+    }
+  }
+
+  return { fns, hasSelfdestruct, dispatchFound: dispatch.size > 0, namedDelegatecall };
 }
 
 /** Selectors of "should be privileged" functions we check for missing guards. */
@@ -212,6 +241,26 @@ export const GUARD_CHECK_SELECTORS: Record<string, string> = {
   '0x69fe0e2d': 'setFee(uint256)',
   '0x8456cb59': 'pause()',
   '0xc2e5ec04': 'setTradingEnabled(bool)',
+  '0x3659cfe6': 'upgradeTo(address)',
+  '0x4f1ef286': 'upgradeToAndCall(address,bytes)',
+  '0xd784d426': 'setImplementation(address)',
+  '0xbb913f41': '_setImplementation(address)',
+  '0x8f283970': 'changeAdmin(address)',
+  '0x704b6c02': 'setAdmin(address)',
+  '0x13af4035': 'setOwner(address)',
+  '0x79cc6790': 'burnFrom(address,uint256)',
+  '0xb61d27f6': 'execute(address,uint256,bytes)',
+  '0xa0b5ffb0': 'functionCall(address,bytes)',
+};
+
+const UPGRADE_SELECTORS: Record<string, string> = {
+  '0x3659cfe6': 'upgradeTo(address)',
+  '0x4f1ef286': 'upgradeToAndCall(address,bytes)',
+  '0xd784d426': 'setImplementation(address)',
+  '0xbb913f41': '_setImplementation(address)',
+  '0x8f283970': 'changeAdmin(address)',
+  '0x704b6c02': 'setAdmin(address)',
+  '0x13af4035': 'setOwner(address)',
 };
 
 const INIT_SELECTORS = ['0x8129fc1c', '0x4cd88b76', '0xc4d66de8'];
@@ -230,6 +279,12 @@ export interface CodeVulns {
   unguardedOwnershipXfer: string | null;
   /** a privileged fn authenticates via tx.origin — spoofable through a malicious contract */
   txOriginAuth: string | null;
+  /** anyone can swap the implementation / admin — total takeover */
+  unguardedUpgrade: string | null;
+  /** anyone can burn someone else's balance */
+  publicBurnFrom: string | null;
+  /** a named function delegatecalls with no caller check — arbitrary code as the token */
+  arbitraryDelegatecall: string | null;
   /** did we manage to parse a dispatcher at all (low => analysis is unreliable) */
   analyzable: boolean;
 }
@@ -300,5 +355,39 @@ export function deriveVulns(codeHex: string, classSelectors: Record<string, stri
     }
   }
 
-  return { guard, unprotectedInit, publicSelfdestruct, reentrancy, unguardedOwnershipXfer, txOriginAuth, analyzable: c.dispatchFound };
+  // anyone can swap the implementation / admin -> total takeover
+  let unguardedUpgrade: string | null = null;
+  for (const [selu, sig] of Object.entries(UPGRADE_SELECTORS)) {
+    const f = c.fns[selu];
+    if (f && (f.writesState || f.hasDelegatecall) && !f.usesCaller && !f.usesTxOrigin) {
+      unguardedUpgrade = sig;
+      break;
+    }
+  }
+
+  // anyone can burn someone else's balance (no allowance/caller check)
+  let publicBurnFrom: string | null = null;
+  const bf = c.fns['0x79cc6790'];
+  if (bf && bf.writesState && !bf.callerBeforeWrite && !bf.usesTxOrigin) publicBurnFrom = 'burnFrom(address,uint256)';
+
+  // a NAMED function delegatecalls with no caller check -> arbitrary code as the token
+  // (skip if it's an upgrade fn — already reported above)
+  let arbitraryDelegatecall: string | null = null;
+  const nd = c.namedDelegatecall;
+  if (nd && !nd.guarded && !UPGRADE_SELECTORS[nd.sel]) {
+    arbitraryDelegatecall = GUARD_CHECK_SELECTORS[nd.sel] || nd.sel;
+  }
+
+  return {
+    guard,
+    unprotectedInit,
+    publicSelfdestruct,
+    reentrancy,
+    unguardedOwnershipXfer,
+    txOriginAuth,
+    unguardedUpgrade,
+    publicBurnFrom,
+    arbitraryDelegatecall,
+    analyzable: c.dispatchFound,
+  };
 }

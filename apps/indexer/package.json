@@ -1,0 +1,25 @@
+{
+  "name": "@liqarch/indexer",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "scan": "tsx src/index.ts scan",
+    "verify-lockers": "tsx src/index.ts verify-lockers",
+    "db:push": "drizzle-kit push",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@envio-dev/hypersync-client": "^0.6.5",
+    "@liqarch/shared": "workspace:*",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.0",
+    "p-limit": "^6.1.0",
+    "postgres": "^3.4.4",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.28.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

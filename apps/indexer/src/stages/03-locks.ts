@@ -68,7 +68,9 @@ export async function reconstructLpHolders(
       toBlock: opts.toBlock,
       logs: [{ address: chunk, topics: [[TOPIC_TRANSFER]] }],
       fieldSelection: {
-        log: ['Address', 'Topic1', 'Topic2', 'Data'] as LogField[],
+        // Select from Topic0 contiguously so the returned `topics` array is
+        // positional and topics[1]/topics[2] are the indexed from/to.
+        log: ['Address', 'Topic0', 'Topic1', 'Topic2', 'Data'] as LogField[],
       },
     };
 
@@ -83,13 +85,14 @@ export async function reconstructLpHolders(
           const book = balances.get(lp);
           if (!book) continue;
 
-          // Transfer is (from indexed, to indexed, value). Some non-standard
-          // tokens emit it with fewer indexed args; those show up with a null
-          // topic2 and we skip them rather than mis-attribute a balance.
-          if (!log.topic1 || !log.topic2) continue;
+          // Transfer is (from indexed, to indexed, value). The Node client
+          // exposes indexed args as ONE `topics` array, not topic1/topic2.
+          // Some non-standard tokens emit fewer indexed args; skip those.
+          const topics = (log.topics ?? []) as (string | null | undefined)[];
+          if (!topics[1] || !topics[2]) continue;
 
-          const from = ('0x' + log.topic1.slice(-40)).toLowerCase();
-          const to = ('0x' + log.topic2.slice(-40)).toLowerCase();
+          const from = ('0x' + (topics[1] as string).slice(-40)).toLowerCase();
+          const to = ('0x' + (topics[2] as string).slice(-40)).toLowerCase();
           const value = BigInt(log.data && log.data !== '0x' ? log.data.slice(0, 66) : '0x0');
           if (value === 0n) continue;
 

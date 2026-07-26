@@ -89,6 +89,7 @@ export async function discover(opts: DiscoverOptions): Promise<{ total: number; 
   const blockTimes = new Map<number, number>();
   const started = Date.now();
   let total = 0;
+  let rawLogs = 0;
 
   logger.info(`discovery: blocks ${fromBlock} -> ${toBlock} (exclusive)`);
 
@@ -105,8 +106,13 @@ export async function discover(opts: DiscoverOptions): Promise<{ total: number; 
         }
       }
 
+      rawLogs += res.data?.logs?.length ?? 0;
       for (const log of res.data?.logs ?? []) {
-        const topic0 = (log.topic0 ?? '').toLowerCase();
+        // The Node client returns indexed topics as ONE `topics` array —
+        // NOT as log.topic0/topic1/... Reading the latter yields undefined and
+        // silently drops every event (this is exactly what returned 0 pools).
+        const topics = (log.topics ?? []) as (string | null | undefined)[];
+        const topic0 = (topics[0] ?? '').toLowerCase();
         const kind = TOPIC_TO_KIND[topic0];
         if (!kind) continue;
 
@@ -121,9 +127,9 @@ export async function discover(opts: DiscoverOptions): Promise<{ total: number; 
           address: addrFromWord(poolWord),
           kind,
           factory: (log.address ?? '').toLowerCase(),
-          token0: addrFromWord(log.topic1 ?? ''),
-          token1: addrFromWord(log.topic2 ?? ''),
-          feeTier: kind === 'v3' && log.topic3 ? parseInt(log.topic3, 16) : null,
+          token0: addrFromWord(topics[1] ?? ''),
+          token1: addrFromWord(topics[2] ?? ''),
+          feeTier: kind === 'v3' && topics[3] ? parseInt(topics[3] as string, 16) : null,
           createdBlock: blockNumber,
           createdTs: blockTimes.get(blockNumber) ?? null,
           createdTx: log.transactionHash ?? null,
@@ -151,9 +157,8 @@ export async function discover(opts: DiscoverOptions): Promise<{ total: number; 
   }
 
   logger.info(
-    `discovery: ${total.toLocaleString()} pools from ${factories.size} distinct factories in ${(
-      (Date.now() - started) / 1000
-    ).toFixed(1)}s`,
+    `discovery: ${total.toLocaleString()} pools from ${factories.size} distinct factories ` +
+      `(${rawLogs.toLocaleString()} raw creation logs seen) in ${((Date.now() - started) / 1000).toFixed(1)}s`,
   );
 
   return { total, factories };

@@ -61,7 +61,9 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
   const [cursor, setCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Row | null>(null);
+  const [live, setLive] = useState<Record<string, any>>(stats);
   const parentRef = useRef<HTMLDivElement>(null);
+  const running = Boolean(live?.running);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -111,9 +113,43 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
     if (items.length && items[items.length - 1].index >= rows.length - 15) loadMore();
   }, [virt.getVirtualItems(), rows.length, loadMore]);
 
+  // --- Live updates ------------------------------------------------------
+  // Poll the header stats every 4s so the pools/locked/scanned counters and
+  // the "scanning" indicator move on their own.
+  useEffect(() => {
+    let active = true;
+    const tick = async () => {
+      try {
+        const r = await fetch('/api/stats', { cache: 'no-store' });
+        if (active && r.ok) setLive(await r.json());
+      } catch {}
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // While a scan is running, refresh the visible list every 5s (respecting the
+  // current filters) so newly-found coins stream in without a manual reload.
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tokens?${qs}`, { cache: 'no-store' });
+        const json = await res.json();
+        setRows(json.rows);
+        setCursor(json.nextCursor);
+      } catch {}
+    }, 5000);
+    return () => clearInterval(id);
+  }, [running, qs]);
+
   return (
     <div className="flex h-screen flex-col">
-      <Header stats={stats} />
+      <Header stats={live} running={running} />
       <FilterBar filters={filters} setFilters={setFilters} count={rows.length} loading={loading} />
 
       <div className="grid grid-cols-[minmax(0,1fr)_auto] flex-1 overflow-hidden">
@@ -158,12 +194,18 @@ export default function Dashboard({ initialRows, stats }: { initialRows: Row[]; 
   );
 }
 
-function Header({ stats }: { stats: Record<string, number> }) {
+function Header({ stats, running }: { stats: Record<string, any>; running?: boolean }) {
   return (
     <header className="flex items-center justify-between border-b border-edge px-5 py-3">
       <div className="flex items-baseline gap-3">
         <h1 className="font-mono text-sm font-semibold tracking-tight">liquidity-archaeologist</h1>
         <span className="text-xs text-muted">pre-2024 ETH launches with surviving locked liquidity</span>
+        {running && (
+          <span className="flex items-center gap-1.5 rounded-full bg-good/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-good">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-good" />
+            scanning live
+          </span>
+        )}
       </div>
       <div className="flex gap-6">
         <Stat label="pools" value={stats.passing?.toLocaleString() ?? '—'} />

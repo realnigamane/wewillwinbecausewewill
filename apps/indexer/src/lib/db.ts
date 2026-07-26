@@ -45,6 +45,17 @@ export async function finishRun(
     .where(sql`${scanRuns.id} = ${id}`);
 }
 
+/** Bump the running scan's counters mid-flight so the dashboard updates live. */
+export async function updateRunProgress(
+  id: number,
+  o: { stage?: string; poolsDiscovered?: number; poolsPriced?: number; poolsPassing?: number; ethPriceUsd?: number },
+) {
+  await db()
+    .update(scanRuns)
+    .set({ ...o })
+    .where(sql`${scanRuns.id} = ${id}`);
+}
+
 export async function failRun(id: number, error: string) {
   await db()
     .update(scanRuns)

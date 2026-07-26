@@ -20,6 +20,8 @@
  * source is approximate. We never present a heuristic as a certainty.
  */
 
+import type { CodeVulns } from './disasm';
+
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type Confidence = 'firm' | 'heuristic';
 
@@ -48,8 +50,8 @@ export interface FindingContext {
   ownerAddress: string | null;
   /** true = live owner, false = renounced/dead, null = unknown/not present */
   ownerActive: boolean | null;
-  /** guard analysis verdict per class flag: true=guarded, false=unguarded, null=unknown */
-  guard?: Record<string, boolean | null>;
+  /** disassembly-derived non-owner-exploit signals (guards, init, reentrancy…) */
+  code?: CodeVulns;
 }
 
 const money = (n: number | null | undefined) =>
@@ -78,7 +80,7 @@ const CLASS_FN: Record<string, { sig: string; sel: string; verb: string }> = {
 };
 
 function guardOf(ctx: FindingContext, cls: string): boolean | null {
-  return ctx.guard?.[cls] ?? null;
+  return ctx.code?.guard?.[cls] ?? null;
 }
 
 /** Build the finding for one owner-gated capability class. */
@@ -147,8 +149,8 @@ function capabilityFinding(ctx: FindingContext, cls: string): Finding | null {
         pool: ctx.pool,
         lockedUsd: ctx.lockedUsd,
       },
-      attackPath: `${fn.sig} (selector ${fn.sel}) writes to state, and the bytecode analysis found NO caller/owner check before that write. If that holds, any address — not just the dev — can call it: an attacker directly calls it to ${c.attack}. This is a directly exploitable bug, not merely a centralization risk. (Heuristic: confirm by decompiling the ${fn.sig} branch before acting.)`,
-      assessment: `Critical, and it does not depend on trusting the deployer — ${'`'}${fn.sig}${'`'} looks reachable by anyone on-chain. If confirmed, ${S} is unsafe to hold or buy until the function is shown to be guarded. Verify against the decompiled source.`,
+      attackPath: `WHAT: ${fn.sig} (selector ${fn.sel}) changes contract state, but the disassembly finds no msg.sender / owner check before that write — the access-control guard is missing. WHY IT WORKS: with nothing checking the caller, the EVM lets ANY address reach the state-changing code; ownership is never consulted, so "renounced" or not is irrelevant. HOW A RANDOM PERSON DOES IT: open ${S} on Etherscan → "Write Contract" (or "Write as Proxy") → connect any wallet → call ${fn.sig} directly to ${c.attack}. No dev key, one transaction, and it's repeatable. PREVENTION: add an access modifier (OpenZeppelin onlyOwner / AccessControl) so the function's first act is to require the caller is the owner/admin and revert otherwise.`,
+      assessment: `Critical — and it does NOT depend on trusting the deployer. ${fn.sig} looks callable by anyone on-chain, so ${S} can be drained or bricked by a complete stranger. Do not hold or buy until you confirm it reverts for non-privileged callers. HOW TO VERIFY: on Etherscan's Write tab, try calling it from a throwaway wallet, or read the decompiled ${fn.sig} branch for a msg.sender check. (Heuristic — flagged from bytecode, confirm before acting.)`,
     };
   }
 
@@ -228,6 +230,88 @@ function ownerContextFinding(ctx: FindingContext): Finding | null {
   };
 }
 
+// --- non-owner-exploit findings (the bug-bounty class) ---------------------
+
+function unprotectedInitFinding(ctx: FindingContext): Finding | null {
+  const sig = ctx.code?.unprotectedInit;
+  if (!sig) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'UNPROTECTED_INIT',
+    class: 'UNPROTECTED_INIT',
+    title: `Anyone can call ${sig} and seize the contract`,
+    severity: 'critical',
+    confidence: 'heuristic',
+    evidence: { function: sig, token: ctx.token },
+    attackPath: `WHAT: ${sig} writes state (initializers usually set the owner/admin) with no caller check and no visible "already initialized" guard. WHY IT WORKS: an initializer is meant to run once at deploy behind an initializer modifier; without it the door stays open forever. HOW: anyone calls ${sig} from any wallet (Etherscan Write tab) to set THEMSELVES as owner of ${S}. Every owner-gated lever — mint, blacklist, drain, upgrade — is then theirs. On a proxy this is the textbook "uninitialized proxy" takeover. PREVENTION: use OpenZeppelin's initializer / reinitializer modifier (or require(!initialized) then set the flag) and set the owner in that same call.`,
+    assessment: `Critical takeover: if ${sig} is truly open, ${S} has no stable owner — a stranger can claim admin and act as the owner. Treat as hostile until confirmed. VERIFY on Etherscan: is ${sig} exposed on the Write tab, and does calling it revert?`,
+  };
+}
+
+function ownershipSeizeFinding(ctx: FindingContext): Finding | null {
+  const sig = ctx.code?.unguardedOwnershipXfer;
+  if (!sig) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'UNGUARDED_OWNERSHIP',
+    class: 'UNGUARDED_OWNERSHIP',
+    title: `Anyone can call ${sig} to become owner`,
+    severity: 'critical',
+    confidence: 'heuristic',
+    evidence: { function: sig, token: ctx.token, pool: ctx.pool },
+    attackPath: `WHAT: ${sig} reassigns the owner, and the disassembly finds no msg.sender check before that write. WHY IT WORKS: transferOwnership is supposed to be onlyOwner; here the caller check is absent. HOW: a random person calls ${sig} with their OWN address — or has a contract they deployed call it — to become owner of ${S}. Once owner, they unlock every owner-gated function: mint to themselves, disable sells, and drain ${money(ctx.lockedUsd)} at ${ctx.pool}. PREVENTION: restore the onlyOwner guard on transferOwnership (OpenZeppelin Ownable does this by default).`,
+    assessment: `Critical: ownership of ${S} appears grabbable by anyone — a takeover door for any stranger, not just a dev rug. Don't touch until confirmed. VERIFY: call ${sig} from a throwaway wallet on Etherscan and see whether it reverts.`,
+  };
+}
+
+function txOriginFinding(ctx: FindingContext): Finding | null {
+  const sig = ctx.code?.txOriginAuth;
+  if (!sig) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'TX_ORIGIN_AUTH',
+    class: 'TX_ORIGIN_AUTH',
+    title: `Owner check uses tx.origin — spoofable via a contract (${sig})`,
+    severity: 'high',
+    confidence: 'heuristic',
+    evidence: { function: sig, token: ctx.token },
+    attackPath: `WHAT: ${sig} touches tx.origin — a strong sign it authenticates with "tx.origin == owner" instead of "msg.sender == owner". WHY IT WORKS: tx.origin is the EOA that STARTED the transaction, not the immediate caller. So if the real owner can be lured into calling an attacker's contract, that contract can turn around and call ${S}, and the tx.origin check still sees the owner. HOW A RANDOM PERSON DOES IT: deploy a plausible contract (a fake airdrop claim, a "gift", a phishing dApp), get the owner to send it ONE transaction, and inside that call have your contract invoke ${sig} on ${S} as if it were the owner — mint to yourself, reassign owner, flip privileged switches. Your contract is the middleman that impersonates the owner. PREVENTION: never use tx.origin for authorization — use msg.sender == owner.`,
+    assessment: `High: ${S}'s owner can be impersonated by a contract the owner merely interacts with — the "spoof the owner" class. It needs the owner to take one action on the attacker's contract (phishing), so it's not push-button, but it's a real path to full owner powers. VERIFY: read ${sig} for a tx.origin comparison used as an access check.`,
+  };
+}
+
+function publicSelfdestructFinding(ctx: FindingContext): Finding | null {
+  if (!ctx.code?.publicSelfdestruct) return null;
+  const S = sym(ctx.symbol);
+  return {
+    id: 'PUBLIC_SELFDESTRUCT',
+    class: 'PUBLIC_SELFDESTRUCT',
+    title: `Anyone can trigger self-destruct`,
+    severity: 'critical',
+    confidence: 'heuristic',
+    evidence: { token: ctx.token },
+    attackPath: `WHAT: a function reaches the SELFDESTRUCT opcode along a path with no msg.sender check. WHY IT WORKS: SELFDESTRUCT deletes the contract; if the function isn't access-controlled, anyone can fire it. HOW: a random person (or their contract) calls that function to destroy ${S}'s contract — every holder's balance then points at empty code and ${S} is permanently bricked, while any ${ctx.quoteSymbol ?? 'paired'} value already pulled from ${ctx.pool} is gone. PREVENTION: remove SELFDESTRUCT (a token rarely needs it) or gate it behind strict access control + a timelock.`,
+    assessment: `Critical griefing/rug: a stranger may be able to delete ${S} outright. Locked liquidity is no protection if the token contract itself can be destroyed. VERIFY which function reaches the self-destruct and whether it checks the caller.`,
+  };
+}
+
+function reentrancyFinding(ctx: FindingContext): Finding | null {
+  const fns = ctx.code?.reentrancy;
+  if (!fns || !fns.length) return null;
+  const S = sym(ctx.symbol);
+  const list = fns.slice(0, 3).join(', ');
+  return {
+    id: 'REENTRANCY',
+    class: 'REENTRANCY',
+    title: `State changes after an external call — reentrancy surface (${list})`,
+    severity: 'high',
+    confidence: 'heuristic',
+    evidence: { functions: fns.join(', '), token: ctx.token },
+    attackPath: `WHAT: ${list} make an external CALL and then update ${S}'s storage AFTER the call returns (a checks-effects-interactions violation). WHY IT WORKS: the external call hands control to the callee before state is finalized, so a malicious contract can call back in ("re-enter") while balances/flags are stale. HOW A RANDOM PERSON DOES IT: deploy their OWN contract, arrange to be the call target (recipient/hook), and in the fallback re-enter ${S} — double-spending or corrupting accounting, potentially against ${money(ctx.lockedUsd)} at ${ctx.pool}. This is the "interact with it from your own contract" class you can't pull off from a plain wallet. PREVENTION: checks-effects-interactions (write all state BEFORE the external call) and/or a nonReentrant guard.`,
+    assessment: `High: a normal buyer is fine, but an attacker with a custom contract may re-enter and break ${S}'s accounting. Reentrancy needs manual confirmation (the call target and any guard matter). VERIFY by reading the flagged function(s) for state writes placed after the external call.`,
+  };
+}
+
 const OWNER_GATED = ['SET_BALANCE', 'MINT', 'BLACKLIST', 'TRADING_TOGGLE', 'FEE_CTRL', 'PAUSABLE', 'MAXTX'];
 
 /**
@@ -245,7 +329,25 @@ export function generateFindings(ctx: FindingContext, flags: string[]): Finding[
     }
   }
   if (set.has('PROXY')) out.push(proxyFinding(ctx));
-  if (set.has('SELFDESTRUCT')) out.push(selfdestructFinding(ctx));
+
+  // Self-destruct: anyone-can-trigger (critical) supersedes the owner-only framing.
+  if (ctx.code?.publicSelfdestruct) {
+    const psd = publicSelfdestructFinding(ctx);
+    if (psd) out.push(psd);
+  } else if (set.has('SELFDESTRUCT')) {
+    out.push(selfdestructFinding(ctx));
+  }
+
+  // Non-owner-exploit findings (the bug-bounty class).
+  const init = unprotectedInitFinding(ctx);
+  if (init) out.push(init);
+  const seize = ownershipSeizeFinding(ctx);
+  if (seize) out.push(seize);
+  const txo = txOriginFinding(ctx);
+  if (txo) out.push(txo);
+  const re = reentrancyFinding(ctx);
+  if (re) out.push(re);
+
   const oc = ownerContextFinding(ctx);
   if (oc) out.push(oc);
 

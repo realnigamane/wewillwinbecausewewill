@@ -26,6 +26,7 @@
  * failure direction for a risk tool.
  */
 import { BURN_ADDRESSES } from './constants';
+import { deriveVulns, type CodeVulns } from './disasm';
 
 export type RiskSeverity = 'low' | 'med' | 'high' | 'crit';
 export type RiskTier = 'clean' | 'low' | 'medium' | 'high' | 'critical';
@@ -128,7 +129,19 @@ export interface BytecodeAnalysis {
   flags: string[];
   score: number; // 0..100
   tier: RiskTier;
+  /** Non-owner-exploit analysis derived from disassembly. */
+  vulns: CodeVulns;
 }
+
+const EMPTY_VULNS: CodeVulns = {
+  guard: {},
+  unprotectedInit: null,
+  publicSelfdestruct: false,
+  reentrancy: [],
+  unguardedOwnershipXfer: null,
+  txOriginAuth: null,
+  analyzable: false,
+};
 
 function normHex(code: string): string {
   const h = (code || '').toLowerCase();
@@ -185,12 +198,17 @@ export function riskTierOf(score: number): RiskTier {
 export function analyzeTokenBytecode(code: string, owner: string | null): BytecodeAnalysis {
   const hex = normHex(code);
   if (hex.length === 0) {
-    return { hasCode: false, ownerActive: null, ownerAddress: owner, flags: ['NO_CODE'], score: 0, tier: 'clean' };
+    return { hasCode: false, ownerActive: null, ownerAddress: owner, flags: ['NO_CODE'], score: 0, tier: 'clean', vulns: EMPTY_VULNS };
   }
 
   const ownerActive: boolean | null = owner == null ? null : !DEAD.has(owner.toLowerCase());
   const catFlags = scanSelectors(code);
   const { delegatecall, selfdestruct } = scanOpcodes(code);
+
+  // Non-owner-exploit analysis: unguarded privileged fns, unprotected
+  // initializer, anyone-callable self-destruct, reentrancy surface.
+  const classSelectors = Object.fromEntries(RISK_CATEGORIES.map((c) => [c.flag, c.selectors.map((s) => '0x' + s)]));
+  const vulns = deriveVulns(code, classSelectors);
 
   // Unknown ownership is treated as potentially-live (conservative).
   const owned = ownerActive !== false;
@@ -207,6 +225,16 @@ export function analyzeTokenBytecode(code: string, owner: string | null): Byteco
   if (selfdestruct) score += 20;
   if (ownerActive === true) score += 10;
 
+  // Anyone-can-exploit bugs dominate: these are open doors, not "trust the dev".
+  const hasUnguarded = Object.values(vulns.guard).some((g) => g === false);
+  if (hasUnguarded || vulns.unprotectedInit || vulns.publicSelfdestruct || vulns.unguardedOwnershipXfer) {
+    score = Math.max(score, 75);
+  } else if (vulns.txOriginAuth) {
+    score = Math.max(score, 55);
+  } else if (vulns.reentrancy.length) {
+    score = Math.max(score, 50);
+  }
+
   score = Math.min(100, Math.round(score));
 
   const flags = [...catFlags];
@@ -215,5 +243,5 @@ export function analyzeTokenBytecode(code: string, owner: string | null): Byteco
   if (ownerActive === true) flags.push('OWNER_ACTIVE');
   else if (ownerActive === false) flags.push('RENOUNCED');
 
-  return { hasCode: true, ownerActive, ownerAddress: owner, flags, score, tier: riskTierOf(score) };
+  return { hasCode: true, ownerActive, ownerAddress: owner, flags, score, tier: riskTierOf(score), vulns };
 }

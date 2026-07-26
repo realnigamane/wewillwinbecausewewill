@@ -5,6 +5,7 @@
   "scripts": {
     "scan": "tsx src/index.ts scan",
     "verify-lockers": "tsx src/index.ts verify-lockers",
+    "analyze-risk": "tsx src/index.ts analyze-risk",
     "db:push": "drizzle-kit push",
     "typecheck": "tsc --noEmit"
   },

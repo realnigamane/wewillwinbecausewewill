@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+body { @apply bg-base text-ink antialiased; }
+
+/* Tabular figures everywhere numbers are compared column-wise. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a0b0d; }
+::-webkit-scrollbar-thumb { background: #262c33; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #333b44; }

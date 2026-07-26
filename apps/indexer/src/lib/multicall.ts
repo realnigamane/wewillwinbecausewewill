@@ -42,8 +42,18 @@ export interface CallResult<T = unknown> {
 
 export class MulticallEngine {
   private clients: PublicClient[];
+  // Separate client pool for eth_getCode with JSON-RPC batching ON. getCode
+  // can't ride Multicall3 (it's a node method, not a contract call), so without
+  // batching it degenerates to one HTTP request per address — which is exactly
+  // what free endpoints rate-limit into the ground (the ~20-min lock-analysis
+  // wall). `batch` coalesces the concurrent getCode calls into a handful of
+  // POSTs. Kept off the valuation clients so aggregate3 payloads never get
+  // bundled into oversized requests that some nodes reject.
+  private codeClients: PublicClient[];
   private cursor = 0;
+  private codeCursor = 0;
   private limit: ReturnType<typeof pLimit>;
+  private codeConcurrency: number;
   readonly batchSize: number;
 
   constructor(rpcUrls: string[], opts: { concurrency?: number; batchSize?: number } = {}) {
@@ -61,8 +71,25 @@ export class MulticallEngine {
       }),
     );
 
+    this.codeClients = rpcUrls.map((url) =>
+      createPublicClient({
+        chain: mainnet,
+        transport: http(url, {
+          retryCount: 3,
+          retryDelay: 250,
+          timeout: 30_000,
+          // Coalesce up to 100 concurrent getCode requests into one POST,
+          // waiting 20ms to let a batch fill.
+          batch: { wait: 20, batchSize: 100 },
+        }),
+      }),
+    );
+
     // Concurrency scales with endpoint count — each endpoint gets its own budget.
     this.limit = pLimit(opts.concurrency ?? rpcUrls.length * 8);
+    // getCode is now batched, so we can keep a lot in flight regardless of how
+    // few endpoints there are — the requests collapse into shared POSTs anyway.
+    this.codeConcurrency = Math.max(200, rpcUrls.length * 32);
     this.batchSize = opts.batchSize ?? 400;
   }
 
@@ -178,12 +205,13 @@ export class MulticallEngine {
    */
   async getCodeSizes(addresses: string[]): Promise<Map<string, number>> {
     const out = new Map<string, number>();
-    const lim = pLimit(this.clients.length * 8);
+    const lim = pLimit(this.codeConcurrency);
     await Promise.all(
       addresses.map((addr) =>
         lim(async () => {
+          const client = this.codeClients[this.codeCursor++ % this.codeClients.length];
           try {
-            const code = await this.next().getCode({ address: addr as `0x${string}` });
+            const code = await client.getCode({ address: addr as `0x${string}` });
             out.set(addr.toLowerCase(), code && code !== '0x' ? (code.length - 2) / 2 : 0);
           } catch {
             out.set(addr.toLowerCase(), -1); // unknown, distinct from "confirmed no code"

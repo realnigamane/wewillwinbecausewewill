@@ -12,7 +12,11 @@ export async function GET() {
     const [agg] = await db
       .select({
         passing: sql<number>`count(*)::int`,
-        totalLocked: sql<number>`coalesce(sum(${pools.lockedLiquidityUsd}), 0)::float8`,
+        // Clamp each pool's locked to its own total before summing. A locked
+        // fraction can't exceed 1, but stale/near-zero LP totalSupply can make
+        // the stored figure explode (locked >> total). LEAST() sanitizes those
+        // so the headline can't read $2e22 off a handful of bad rows.
+        totalLocked: sql<number>`coalesce(sum(least(${pools.lockedLiquidityUsd}, ${pools.totalLiquidityUsd})), 0)::float8`,
       })
       .from(pools)
       .where(eq(pools.passesThreshold, true));

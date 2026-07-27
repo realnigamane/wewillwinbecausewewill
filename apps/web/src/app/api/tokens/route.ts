@@ -6,7 +6,7 @@
  * scroll deep into 40k+ rows without the UI stalling.
  */
 import { NextResponse } from 'next/server';
-import { and, desc, eq, gte, lte, lt, or, sql, ilike } from 'drizzle-orm';
+import { and, eq, gte, lte, or, sql, ilike } from 'drizzle-orm';
 import { pools, tokens } from '@liqarch/shared';
 import { db } from '@/lib/db';
 
@@ -29,9 +29,17 @@ export async function GET(req: Request) {
   const cursor = p.get('cursor') ? Number(p.get('cursor')) : null;
   const minRisk = p.get('minRisk') ? Number(p.get('minRisk')) : null;
 
-  const where = [eq(pools.passesThreshold, true), gte(pools.lockedLiquidityUsd, minUsd)];
+  // Locked liquidity can never exceed the pool's own total. Some stored rows
+  // violate that (near-zero or stale LP totalSupply blows the fraction past 1,
+  // yielding locked >> total — up to ~1e22). Clamp on read so every filter,
+  // sort, and displayed figure uses a sane value without needing a re-scan.
+  const lockedClamped = sql<number>`least(${pools.lockedLiquidityUsd}, ${pools.totalLiquidityUsd})`;
+  const burnedClamped = sql<number>`least(${pools.burnedLiquidityUsd}, ${pools.totalLiquidityUsd})`;
+  const fractionClamped = sql<number>`least(${pools.lockedFraction}, 1)`;
 
-  if (maxUsd != null) where.push(lte(pools.lockedLiquidityUsd, maxUsd));
+  const where = [eq(pools.passesThreshold, true), sql`least(${pools.lockedLiquidityUsd}, ${pools.totalLiquidityUsd}) >= ${minUsd}`];
+
+  if (maxUsd != null) where.push(sql`least(${pools.lockedLiquidityUsd}, ${pools.totalLiquidityUsd}) <= ${maxUsd}`);
   if (minLockedPct != null) where.push(gte(pools.lockedFraction, minLockedPct));
   if (kind) where.push(eq(pools.kind, kind));
   if (factory) where.push(eq(pools.factory, factory.toLowerCase()));
@@ -40,11 +48,11 @@ export async function GET(req: Request) {
   if (minRisk != null) where.push(gte(pools.riskScore, minRisk));
 
   // "Burned" is the strict, provable subset: LP at a dead address.
-  if (lockType === 'burned') where.push(gte(pools.burnedLiquidityUsd, minUsd));
+  if (lockType === 'burned') where.push(sql`least(${pools.burnedLiquidityUsd}, ${pools.totalLiquidityUsd}) >= ${minUsd}`);
   if (lockType === 'locked') where.push(sql`${pools.lpLockedKnown}::numeric + ${pools.lpLockedUnknownContract}::numeric > 0`);
 
-  // Keyset cursor.
-  if (cursor != null) where.push(lt(pools.lockedLiquidityUsd, cursor));
+  // Keyset cursor — on the SAME clamped expression the rows are ordered by.
+  if (cursor != null) where.push(sql`least(${pools.lockedLiquidityUsd}, ${pools.totalLiquidityUsd}) < ${cursor}`);
 
   const base = db
     .select({
@@ -57,9 +65,9 @@ export async function GET(req: Request) {
       createdBlock: pools.createdBlock,
       createdAt: pools.createdAt,
       totalLiquidityUsd: pools.totalLiquidityUsd,
-      lockedLiquidityUsd: pools.lockedLiquidityUsd,
-      burnedLiquidityUsd: pools.burnedLiquidityUsd,
-      lockedFraction: pools.lockedFraction,
+      lockedLiquidityUsd: lockedClamped,
+      burnedLiquidityUsd: burnedClamped,
+      lockedFraction: fractionClamped,
       riskScore: pools.riskScore,
       riskTier: pools.riskTier,
       riskFlags: pools.riskFlags,
@@ -88,7 +96,9 @@ export async function GET(req: Request) {
 
   const rows = await base
     .where(and(...where))
-    .orderBy(desc(pools.lockedLiquidityUsd))
+    // Order by the clamped value so the former >>total offenders sort by their
+    // real (clamped) locked amount, not the astronomical raw figure.
+    .orderBy(sql`least(${pools.lockedLiquidityUsd}, ${pools.totalLiquidityUsd}) desc`)
     .limit(PAGE + 1);
 
   const hasMore = rows.length > PAGE;

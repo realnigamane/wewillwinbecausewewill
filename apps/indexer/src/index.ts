@@ -27,7 +27,7 @@ import { PRE_2024_END_BLOCK, LOCKERS, QUOTE_ASSETS, generateFindings } from '@li
 import { MulticallEngine } from './lib/multicall.js';
 import { logger } from './lib/log.js';
 import { discover } from './stages/01-discover.js';
-import { valueV2Pools, getEthPriceUsd } from './stages/02-value.js';
+import { valueV2Pools, valueV1Pools, getEthPriceUsd } from './stages/02-value.js';
 import { reconstructLpHolders, analyzeLocks } from './stages/03-locks.js';
 import { analyzeTokenRisk } from './stages/04-risk.js';
 import { persist, startRun, finishRun, failRun, updateRunProgress, persistRisk, loadPassingPools } from './lib/db.js';
@@ -162,15 +162,18 @@ async function scan() {
     // V3 valuation needs tick-range math to value a position; V2 is the bulk of
     // pre-2024 launches and is handled exactly. V3 is scoped as follow-up work
     // rather than approximated badly here.
+    const v1 = pools.filter((p) => p.kind === 'v1');
     const v2 = pools.filter((p) => p.kind === 'v2');
     const v3 = pools.filter((p) => p.kind === 'v3');
-    logger.info(`  ${v2.length.toLocaleString()} V2-style, ${v3.length.toLocaleString()} V3-style`);
+    logger.info(
+      `  ${v1.length.toLocaleString()} V1 (2018–2020), ${v2.length.toLocaleString()} V2-style, ${v3.length.toLocaleString()} V3-style`,
+    );
 
     // ---- Stage 2: valuation -------------------------------------------
     const ethPriceUsd = await getEthPriceUsd(mc);
     logger.info(`ETH/USD from Chainlink: $${ethPriceUsd.toFixed(2)}`);
 
-    const valued = await valueV2Pools(mc, v2, {
+    const valuedV2 = await valueV2Pools(mc, v2, {
       ethPriceUsd,
       // Pre-filter on TOTAL value. A pool can't have $100 locked if it holds
       // less than $100 in the first place, so this is a safe, lossless narrow.
@@ -179,6 +182,9 @@ async function scan() {
         if (done % 25_000 < 400) logger.info(`  valuation ${done.toLocaleString()}/${total.toLocaleString()}`);
       },
     });
+    const valuedV1 = await valueV1Pools(mc, v1, { ethPriceUsd, minTotalUsd: minLockedUsd });
+    const valued = [...valuedV2, ...valuedV1];
+    logger.info(`  valued: ${valuedV2.length.toLocaleString()} V2 + ${valuedV1.length.toLocaleString()} V1 exchanges`);
 
     // ---- Stage 3: lock analysis + INCREMENTAL persist -----------------
     // Process survivors in chunks all the way through (LP replay ->

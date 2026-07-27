@@ -51,6 +51,18 @@ export const TOPIC_PAIR_CREATED =
 export const TOPIC_POOL_CREATED =
   '0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118';
 
+/**
+ * Uniswap V1 style — the ORIGINAL DEX (Nov 2018 – 2020). Pre-dates V2 entirely,
+ * so it's the only way to see 2018–2020 liquidity. Every V1 exchange is an
+ * ETH/token pool AND its own ERC-20 LP token, so it fits the same locked-LP
+ * analysis as V2 once discovered.
+ *
+ * event NewExchange(address indexed token, address indexed exchange)
+ *   topic1 = token, topic2 = exchange (the pool + the LP token)
+ */
+export const TOPIC_NEW_EXCHANGE =
+  '0x9d42cb017eb05bd8944ab536a8b35bc68085931dd5f4356489801453923953f9';
+
 /** Balancer V2 registers pools against a singleton Vault. Different shape; see notes in README. */
 export const TOPIC_POOL_REGISTERED =
   '0x3c13bc30b8e878c53fd2a36b679409c073afd75950be43d8858768e956fbc20e';
@@ -59,11 +71,12 @@ export const TOPIC_POOL_REGISTERED =
 export const TOPIC_TRANSFER =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-export type PoolKind = 'v2' | 'v3';
+export type PoolKind = 'v1' | 'v2' | 'v3';
 
 export const TOPIC_TO_KIND: Record<string, PoolKind> = {
   [TOPIC_PAIR_CREATED]: 'v2',
   [TOPIC_POOL_CREATED]: 'v3',
+  [TOPIC_NEW_EXCHANGE]: 'v1',
 };
 
 // ---------------------------------------------------------------------------
@@ -75,6 +88,9 @@ export const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
 
 /** Chainlink ETH/USD price feed. Lets us price pools with zero external API keys. */
 export const CHAINLINK_ETH_USD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419';
+
+/** WETH — used as the ETH-side proxy for Uniswap V1 exchanges (which hold raw ETH). */
+export const WETH_ADDRESS = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
 
 /** Uniswap V3 NonfungiblePositionManager — holds V3 liquidity as NFTs. */
 export const UNIV3_POSITION_MANAGER = '0xC36442b4a4522E871399CD717aBDD847Ab11FE88';

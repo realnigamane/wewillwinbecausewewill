@@ -190,9 +190,14 @@ export async function analyzeLocks(
     }
 
     const lockedTotal = burned + lockedKnown + lockedUnknownContract;
-    const lockedFraction = Number((lockedTotal * 1_000_000n) / pool.lpTotalSupply) / 1_000_000;
+    // A locked (or burned) fraction cannot exceed 1 by definition. A near-zero or
+    // stale LP totalSupply — e.g. supply that shrank after our replay window, or a
+    // token with unusual supply mechanics — can push the raw ratio far past 1
+    // (observed up to ~1e19), which would store phantom locked USD and blow up the
+    // headline total. Clamp to [0,1] at the source so downstream never sees it.
+    const lockedFraction = Math.min(1, Number((lockedTotal * 1_000_000n) / pool.lpTotalSupply) / 1_000_000);
     const lockedLiquidityUsd = pool.totalLiquidityUsd * lockedFraction;
-    const burnedFraction = Number((burned * 1_000_000n) / pool.lpTotalSupply) / 1_000_000;
+    const burnedFraction = Math.min(1, Number((burned * 1_000_000n) / pool.lpTotalSupply) / 1_000_000);
 
     if (lockedLiquidityUsd < opts.minLockedUsd) continue;
 

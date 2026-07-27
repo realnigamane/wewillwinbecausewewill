@@ -17,8 +17,10 @@ import { HypersyncClient, type LogField } from '@envio-dev/hypersync-client';
 import {
   TOPIC_PAIR_CREATED,
   TOPIC_POOL_CREATED,
+  TOPIC_NEW_EXCHANGE,
   TOPIC_TO_KIND,
   PRE_2024_END_BLOCK,
+  WETH_ADDRESS,
 } from '@liqarch/shared';
 import { createWriteStream } from 'node:fs';
 import { logger } from '../lib/log.js';
@@ -66,7 +68,8 @@ export async function discover(opts: DiscoverOptions): Promise<{ total: number; 
     toBlock,
     logs: [
       // No `address` key => every factory, including undiscovered forks.
-      { topics: [[TOPIC_PAIR_CREATED, TOPIC_POOL_CREATED]] },
+      // TOPIC_NEW_EXCHANGE brings in Uniswap V1 (2018–2020), pre-V2 liquidity.
+      { topics: [[TOPIC_PAIR_CREATED, TOPIC_POOL_CREATED, TOPIC_NEW_EXCHANGE]] },
     ],
     fieldSelection: {
       log: [
@@ -116,24 +119,45 @@ export async function discover(opts: DiscoverOptions): Promise<{ total: number; 
         const kind = TOPIC_TO_KIND[topic0];
         if (!kind) continue;
 
-        const data = log.data ?? '0x';
-        // V2: data = [pair, allPairsLength]        -> pool is word 0
-        // V3: data = [tickSpacing, pool]           -> pool is word 1
-        const poolWord = kind === 'v2' ? word(data, 0) : word(data, 1);
-        if (poolWord.length < 64) continue; // malformed / truncated, skip rather than emit garbage
-
         const blockNumber = Number(log.blockNumber);
-        const rec: DiscoveredPool = {
-          address: addrFromWord(poolWord),
-          kind,
-          factory: (log.address ?? '').toLowerCase(),
-          token0: addrFromWord(topics[1] ?? ''),
-          token1: addrFromWord(topics[2] ?? ''),
-          feeTier: kind === 'v3' && topics[3] ? parseInt(topics[3] as string, 16) : null,
-          createdBlock: blockNumber,
-          createdTs: blockTimes.get(blockNumber) ?? null,
-          createdTx: log.transactionHash ?? null,
-        };
+        let rec: DiscoveredPool;
+
+        if (kind === 'v1') {
+          // NewExchange(token indexed, exchange indexed): the exchange IS both
+          // the pool and its LP token, and it holds raw ETH — so WETH stands in
+          // as the priceable quote side.
+          const exchange = addrFromWord(topics[2] ?? '');
+          const token = addrFromWord(topics[1] ?? '');
+          if (exchange.length < 42 || token.length < 42) continue;
+          rec = {
+            address: exchange,
+            kind,
+            factory: (log.address ?? '').toLowerCase(),
+            token0: WETH_ADDRESS,
+            token1: token,
+            feeTier: null,
+            createdBlock: blockNumber,
+            createdTs: blockTimes.get(blockNumber) ?? null,
+            createdTx: log.transactionHash ?? null,
+          };
+        } else {
+          const data = log.data ?? '0x';
+          // V2: data = [pair, allPairsLength]        -> pool is word 0
+          // V3: data = [tickSpacing, pool]           -> pool is word 1
+          const poolWord = kind === 'v2' ? word(data, 0) : word(data, 1);
+          if (poolWord.length < 64) continue; // malformed / truncated, skip rather than emit garbage
+          rec = {
+            address: addrFromWord(poolWord),
+            kind,
+            factory: (log.address ?? '').toLowerCase(),
+            token0: addrFromWord(topics[1] ?? ''),
+            token1: addrFromWord(topics[2] ?? ''),
+            feeTier: kind === 'v3' && topics[3] ? parseInt(topics[3] as string, 16) : null,
+            createdBlock: blockNumber,
+            createdTs: blockTimes.get(blockNumber) ?? null,
+            createdTx: log.transactionHash ?? null,
+          };
+        }
 
         out.write(JSON.stringify(rec) + '\n');
         factories.set(rec.factory, (factories.get(rec.factory) ?? 0) + 1);

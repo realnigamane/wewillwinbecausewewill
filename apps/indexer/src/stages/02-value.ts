@@ -27,6 +27,7 @@ import {
   UNIV2_PAIR_ABI,
   CHAINLINK_FEED_ABI,
   CHAINLINK_ETH_USD,
+  MULTICALL3,
 } from '@liqarch/shared';
 import type { MulticallEngine, Call } from '../lib/multicall.js';
 import type { DiscoveredPool, ValuedPool } from '../lib/types.js';
@@ -150,5 +151,86 @@ export async function valueV2Pools(
       `(${((out.length / Math.max(priceable.length, 1)) * 100).toFixed(1)}% survival)`,
   );
 
+  return out;
+}
+
+const MC3_GETETHBALANCE_ABI = [
+  {
+    inputs: [{ name: 'addr', type: 'address' }],
+    name: 'getEthBalance',
+    outputs: [{ type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
+const ERC20_MIN_ABI = [
+  { inputs: [], name: 'totalSupply', outputs: [{ type: 'uint256' }], stateMutability: 'view', type: 'function' },
+  {
+    inputs: [{ name: 'a', type: 'address' }],
+    name: 'balanceOf',
+    outputs: [{ type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
+/**
+ * Value Uniswap V1 exchanges. Each exchange holds raw ETH + a token and IS its
+ * own LP token, so we read: its ETH balance (via Multicall3.getEthBalance, which
+ * batches inside the same aggregate), its LP totalSupply, and the token reserve.
+ * Pool value = 2 x the ETH-side USD, exactly like a WETH-paired V2 pool.
+ */
+export async function valueV1Pools(
+  mc: MulticallEngine,
+  pools: DiscoveredPool[],
+  opts: ValueOptions,
+): Promise<ValuedPool[]> {
+  if (pools.length === 0) return [];
+  logger.info(`valuation(v1): ${pools.length.toLocaleString()} Uniswap V1 exchanges to price`);
+
+  const calls: Call[] = [];
+  for (const p of pools) {
+    calls.push({ target: MULTICALL3, abi: MC3_GETETHBALANCE_ABI, functionName: 'getEthBalance', args: [p.address] });
+    calls.push({ target: p.address, abi: ERC20_MIN_ABI, functionName: 'totalSupply' });
+    calls.push({ target: p.token1, abi: ERC20_MIN_ABI, functionName: 'balanceOf', args: [p.address] });
+  }
+
+  const results = await mc.execute(calls, {
+    onProgress: (done) => opts.onProgress?.(Math.floor(done / 3), pools.length),
+  });
+
+  const out: ValuedPool[] = [];
+  for (let i = 0; i < pools.length; i++) {
+    const p = pools[i];
+    const ethRes = results[i * 3];
+    const supRes = results[i * 3 + 1];
+    const tokRes = results[i * 3 + 2];
+    // A dead V1 exchange with no ETH balance can't be answered / holds nothing.
+    if (!ethRes.success || !supRes.success) continue;
+
+    const ethBalance = ethRes.value as bigint;
+    const lpTotalSupply = supRes.value as bigint;
+    if (lpTotalSupply === 0n) continue;
+
+    const tokenBalance = tokRes.success ? (tokRes.value as bigint) : 0n;
+    const ethAmount = Number(formatUnits(ethBalance, 18));
+    const totalLiquidityUsd = ethAmount * opts.ethPriceUsd * 2;
+    if (totalLiquidityUsd < opts.minTotalUsd) continue;
+
+    out.push({
+      ...p,
+      quoteSide: 0, // WETH stands in for the ETH side
+      reserve0: ethBalance,
+      reserve1: tokenBalance,
+      lpTotalSupply,
+      totalLiquidityUsd,
+    });
+  }
+
+  logger.info(
+    `valuation(v1): ${out.length.toLocaleString()} exchanges hold >= $${opts.minTotalUsd} ` +
+      `(${((out.length / Math.max(pools.length, 1)) * 100).toFixed(1)}% survival)`,
+  );
   return out;
 }

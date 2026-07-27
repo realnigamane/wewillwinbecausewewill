@@ -72,10 +72,11 @@ interface Filters {
 
 const DEFAULTS: Filters = { minUsd: 100, maxUsd: '', minLockedPct: 0, lockType: '', kind: '', minRisk: 0, ageBand: '', q: '' };
 
-// created-block ranges by approximate age (as of 2026). AMM pools start ~block
-// 10,000,835 (Uniswap V2, May 2020), so "6-8 yrs" is really the earliest V2 pools.
+// created-block ranges by approximate age (as of 2026). Uniswap V1 launched at
+// block ~6,627,917 (Nov 2018) and V2 at ~10,000,835 (May 2020), so the "6-8 yrs"
+// band spans the V1 era plus the earliest V2 pools.
 const AGE_BANDS: Record<string, { after: number; before: number }> = {
-  '6-8': { after: 6_000_000, before: 10_530_000 }, // ~2018 → Jul 2020
+  '6-8': { after: 6_000_000, before: 10_530_000 }, // Nov 2018 (V1) → Jul 2020
   '4-6': { after: 10_530_000, before: 15_200_000 }, // Jul 2020 → Jul 2022
   '2-4': { after: 15_200_000, before: 18_908_895 }, // Jul 2022 → end 2023
 };
@@ -322,6 +323,7 @@ function FilterBar({
         className="rounded border border-edge bg-base px-2 py-1.5 outline-none focus:border-accent"
       >
         <option value="">all DEXes</option>
+        <option value="v1">V1 (pre-2020)</option>
         <option value="v2">V2-style</option>
         <option value="v3">V3-style</option>
       </select>

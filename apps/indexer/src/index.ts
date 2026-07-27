@@ -183,8 +183,11 @@ async function scan() {
       },
     });
     const valuedV1 = await valueV1Pools(mc, v1, { ethPriceUsd, minTotalUsd: minLockedUsd });
-    const valued = [...valuedV2, ...valuedV1];
-    logger.info(`  valued: ${valuedV2.length.toLocaleString()} V2 + ${valuedV1.length.toLocaleString()} V1 exchanges`);
+    // V1 FIRST: the pre-2020 exchanges are the rare, whole-point-of-this-scan
+    // pools. Banking them ahead of the ~12k V2 survivors means a run that times
+    // out still captures the OG liquidity instead of never reaching it.
+    const valued = [...valuedV1, ...valuedV2];
+    logger.info(`  valued: ${valuedV1.length.toLocaleString()} V1 (banked first) + ${valuedV2.length.toLocaleString()} V2 exchanges`);
 
     // ---- Stage 3: lock analysis + INCREMENTAL persist -----------------
     // Process survivors in chunks all the way through (LP replay ->
